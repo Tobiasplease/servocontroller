@@ -27,14 +27,21 @@ import glob
 import traceback
 import datetime
 from typing import Optional
+from serial.tools import list_ports  # For COM port auto-detection
+try:
+    from PIL import Image, ImageTk  # For better image support
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    print("[TIP] Install Pillow (pip install Pillow) for enhanced image support!")
 
 # Import hand controller from local module
 try:
     from hand_expression import HandExpressionController
     HAND_CONTROLLER_AVAILABLE = True
-    print("✅ Hand controller available")
+    print("[OK] Hand controller available")
 except ImportError as e:
-    print(f"⚠️ Hand controller not available - simulation mode: {e}")
+    print(f"[WARNING] Hand controller not available - simulation mode: {e}")
     HAND_CONTROLLER_AVAILABLE = False
 
 
@@ -74,33 +81,98 @@ class CleanCursorInterface:
     
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("🎯 Hand Control")
+        self.root.title("Hand Control")
         
-        # FIXED WINDOW SIZE - No more resizing!
-        self.root.geometry("650x650")  # Fixed square dimensions
+        # FIXED WINDOW SIZE - No more resizing! (Made wider to prevent cutoff)
+        self.root.geometry("750x650")  # Back to full width to show complete background
         self.root.resizable(False, False)  # Disable resizing completely
-        self.root.minsize(650, 650)  # Enforce minimum
-        self.root.maxsize(650, 650)  # Enforce maximum
-        # Color scheme similar to original
+        self.root.minsize(750, 650)  # Enforce minimum
+        self.root.maxsize(750, 650)  # Enforce maximum
+        # Soft Pastel Pink Color Scheme 🌸✨
         self.colors = {
-            'bg_main': '#FFE4E6',        # Light pink background
-            'bg_frame': '#F8BBD9',       # Medium pink for frames
-            'bg_accent': '#E4A5FF',      # Light purple accent
-            'text_main': '#4A4A4A',      # Dark gray text
-            'text_accent': '#8B5CF6',    # Purple accent text
-            'button_bg': '#DDA0DD',      # Plum button background
-            'button_active': '#FF69B4',  # Hot pink for active buttons
-            'success': '#98FB98',        # Light green for success
-            'warning': '#FFB347',        # Peach for warnings
-            'error': '#FFB6C1'          # Light pink for errors
+            'bg_main': '#FEF7F7',        # Very light rose - softest main background
+            'bg_frame': '#F8E8E8',       # Pale rose - subtle frame backgrounds  
+            'bg_accent': '#F0D0D0',      # Soft dusty rose - gentle accent areas
+            'text_main': '#5D4E75',      # Muted purple - easy on the eyes
+            'text_accent': '#8B7B8B',    # Soft mauve - gentle accent text
+            'button_bg': '#E8C5E8',      # Very pale lavender pink - soft buttons
+            'button_hover': '#D8B5D8',   # Slightly deeper lavender - gentle hover
+            'button_active': '#C8A5C8',  # Muted rose - subtle active state
+            'success': '#C8E6C9',        # Soft mint green - gentle success
+            'warning': '#FFE0B2',        # Pale peach - soft warnings  
+            'error': '#FFCDD2',          # Light coral pink - gentle errors
+            'canvas_bg': '#FFFEF8',      # Warm white - clean canvas
+            'widget_fg': '#6B5B73'       # Soft purple - widget text
         }
         
         # Apply main background color
         self.root.configure(bg=self.colors['bg_main'])
         
+        # Custom fonts setup (before style configuration) 🔤
+        self.setup_custom_fonts()
+        
+        # Try to set a cute window icon (optional)
+        try:
+            # You can replace this with your own icon file!
+            if os.path.exists("icon.ico"):
+                self.root.iconbitmap("icon.ico")
+        except:
+            pass  # No icon is fine
+        
+        # Configure cute pastel ttk style 🌸✨
+        self.style = ttk.Style()
+        self.style.theme_use('clam')  # Use a modern base theme
+        
+        # Configure ttk widget styles with our soft pastel theme
+        self.style.configure('TFrame', background=self.colors['bg_main'])
+        
+        # Beautiful LabelFrame styling - no more boring grey boxes! 🌸
+        self.style.configure('TLabelFrame', 
+                           background=self.colors['bg_frame'],  # Soft pink background
+                           bordercolor='#F472B6',  # Vibrant pink border  
+                           relief='raised', 
+                           borderwidth=2,
+                           lightcolor='#FFE4E6',  # Light pink highlight
+                           darkcolor='#DDA0DD')  # Soft purple shadow
+        
+        # Style the label text of frames
+        self.style.configure('TLabelFrame.Label', 
+                           background=self.colors['bg_frame'], 
+                           foreground='#BE185D',  # Deep pink text
+                           font=self.fonts['button'])  # Use our custom font
+        
+        self.style.configure('TLabel', background=self.colors['bg_main'], 
+                           foreground=self.colors['text_main'])
+        
+        # Soft pastel buttons with subtle hover effects
+        self.style.configure('TButton', background=self.colors['button_bg'], 
+                           foreground=self.colors['widget_fg'], borderwidth=1, focuscolor='none',
+                           relief='raised')
+        self.style.map('TButton',
+                      background=[('active', self.colors['button_hover']),
+                                ('pressed', self.colors['button_active'])])
+        
+        self.style.configure('TCombobox', fieldbackground=self.colors['bg_frame'],
+                           bordercolor=self.colors['bg_accent'], arrowcolor=self.colors['text_accent'])
+        
+        self.style.configure('TScale', background=self.colors['bg_main'],
+                           troughcolor=self.colors['bg_frame'], bordercolor=self.colors['bg_accent'])
+        
+        self.style.configure('TCheckbutton', background=self.colors['bg_main'],
+                           foreground=self.colors['text_main'], focuscolor='none')
+        
+        # Special style for emotion buttons to make them extra cute
+        self.style.configure('Emotion.TButton', background=self.colors['button_bg'],
+                           foreground=self.colors['text_main'], font=self.fonts['button'],
+                           borderwidth=2, relief='raised')
+        self.style.map('Emotion.TButton',
+                      background=[('active', self.colors['button_hover']),
+                                ('pressed', self.colors['button_active'])])
+        
         # FIXED SCROLLABLE INTERFACE - No more auto-resizing
         # Create main canvas with scrollbar for scrollable content
         self.main_canvas = tk.Canvas(self.root, bg=self.colors['bg_main'], highlightthickness=0)
+        
         self.scrollbar = tk.Scrollbar(self.root, orient="vertical", command=self.main_canvas.yview)
         self.scrollable_frame = tk.Frame(self.main_canvas, bg=self.colors['bg_main'])
         
@@ -112,8 +184,8 @@ class CleanCursorInterface:
         self.main_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         self.main_canvas.configure(yscrollcommand=self.scrollbar.set)
         
-        # Pack canvas and scrollbar
-        self.main_canvas.pack(side="left", fill="both", expand=True)
+        # Pack canvas and scrollbar with better centering
+        self.main_canvas.pack(side="left", fill="both", expand=True, padx=(20, 0))
         self.scrollbar.pack(side="right", fill="y")
         
         # Bind mousewheel to canvas
@@ -131,6 +203,15 @@ class CleanCursorInterface:
         # Hand controller - FIXED CONNECTION LOGIC
         self.hand_controller: Optional[HandExpressionController] = None
         self.connected = False
+        
+        # COM Port Auto-Detection 🔌
+        self.selected_port = tk.StringVar(value="Auto")
+        self.available_ports = []
+        
+        # Image assets (optional) 🖼️
+        self.images = {}  # Store loaded images
+        self.load_custom_images()
+        self.apply_background_image()  # Apply background after images are loaded
         
         # Direct control state - clean and simple!
         self.num_fingers = 4
@@ -336,44 +417,108 @@ class CleanCursorInterface:
         print("🎯 Focus returned to hand control - keyboard finger control active")
     
     def setup_ui(self):
-        """Create clean, focused UI."""
+        """Create clean, focused UI with cute pastel styling."""
+        
+        # === NO HEADER - CLEAN START ===
+        # Remove header completely for seamless background integration
         
         # === CONNECTION FRAME ===
-        conn_frame = ttk.LabelFrame(self.scrollable_frame, text="🔌 Connection")
-        conn_frame.pack(fill=tk.X, padx=15, pady=8)  # Better padding
+        # Create a beautiful custom frame with muted pastel purple styling
+        conn_outer = tk.Frame(self.scrollable_frame, bg='#B8A9D9', relief='raised', bd=2)  # Muted purple border
+        conn_outer.pack(fill=tk.X, padx=10, pady=8)
         
-        # Create inner frame for better button alignment
+        # Header with cute styling
+        conn_header = tk.Frame(conn_outer, bg='#F0EBFF', height=30)  # Very soft lavender header
+        conn_header.pack(fill=tk.X, padx=2, pady=(2,0))
+        conn_header.pack_propagate(False)
+        
+        conn_title = tk.Label(conn_header, text="🔌 Connection", 
+                             bg='#F0EBFF', fg='#6B46C1', 
+                             font=self.fonts['button'])
+        conn_title.pack(pady=5)
+        
+        # Content area with soft background
+        conn_frame = tk.Frame(conn_outer, bg='#FDFCFF', relief='flat')  # Ultra soft purple-white content
+        conn_frame.pack(fill=tk.X, padx=2, pady=(0,2))
+        
+        # Create inner frame for better layout
         conn_inner = ttk.Frame(conn_frame)
         conn_inner.pack(fill=tk.X, padx=10, pady=8)
         
-        self.connect_btn = ttk.Button(conn_inner, text="Connect to Hand Controller", 
-                                     command=self.toggle_connection, width=25)  # Fixed width
-        self.connect_btn.pack(side=tk.LEFT)
+        # Port selector with auto-detection
+        ttk.Label(conn_inner, text="Port:").pack(side=tk.LEFT, padx=(0, 8))
         
-        self.status_label = ttk.Label(conn_inner, text="❌ Disconnected", width=25)
-        self.status_label.pack(side=tk.LEFT, padx=(15, 0))  # More space
+        self.port_combo = ttk.Combobox(conn_inner, textvariable=self.selected_port, 
+                                      width=15, state="readonly")
+        self.port_combo.pack(side=tk.LEFT, padx=(0, 8))
+        
+        # Refresh button
+        refresh_btn = ttk.Button(conn_inner, text="🔄 Refresh", 
+                               command=self.refresh_serial_ports, width=10, takefocus=False)
+        refresh_btn.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Connect button
+        self.connect_btn = ttk.Button(conn_inner, text="Connect", 
+                                     command=self.toggle_connection, width=12, takefocus=False)
+        self.connect_btn.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Status label
+        self.status_label = ttk.Label(conn_inner, text="❌ Disconnected", width=20)
+        self.status_label.pack(side=tk.LEFT)
+        
+        # Auto-populate ports on startup
+        self.refresh_serial_ports()
         
         # === EMOTIONAL STATE CONTROL ===
-        emotion_frame = ttk.LabelFrame(self.scrollable_frame, text="😊 Emotional State Control")
-        emotion_frame.pack(fill=tk.X, padx=15, pady=8)  # Better padding
+        # Create beautiful custom frame with muted pastel purple styling
+        emotion_outer = tk.Frame(self.scrollable_frame, bg='#B8A9D9', relief='raised', bd=2)  # Muted purple border
+        emotion_outer.pack(fill=tk.X, padx=10, pady=8)
+        
+        # Header with cute styling  
+        emotion_header = tk.Frame(emotion_outer, bg='#F0EBFF', height=30)  # Very soft lavender header
+        emotion_header.pack(fill=tk.X, padx=2, pady=(2,0))
+        emotion_header.pack_propagate(False)
+        
+        emotion_title = tk.Label(emotion_header, text="😊 Emotional State Control",
+                                bg='#F0EBFF', fg='#6B46C1',
+                                font=self.fonts['button'])
+        emotion_title.pack(pady=5)
+        
+        # Content area with soft background
+        emotion_frame = tk.Frame(emotion_outer, bg='#FDFCFF', relief='flat')  # Ultra soft purple-white content  
+        emotion_frame.pack(fill=tk.X, padx=2, pady=(0,2))
         
         # Create inner frame for better layout
         emotion_inner = ttk.Frame(emotion_frame)
         emotion_inner.pack(fill=tk.X, padx=10, pady=8)
         
-        # Current state display
+        # Current state display with custom font
         self.current_state_label = ttk.Label(emotion_inner, text=f"Current: {self.current_emotional_state}", 
-                                           font=('Arial', 12, 'bold'))
+                                           font=self.fonts['subtitle'])
         self.current_state_label.pack(pady=(0, 10))  # Bottom padding
         
-        # Emotion buttons - improved layout
+        # Emotion buttons - cute pastel styling with emojis!
         emotion_buttons_frame = ttk.Frame(emotion_inner)
         emotion_buttons_frame.pack(pady=(0, 10))
         
+        # Emotion button data with cute emojis
+        emotion_emojis = {
+            'energized_engaged': '⚡',
+            'alert_curious': '👀', 
+            'calm_observant': '😌',
+            'quiet_detached': '😐',
+            'withdrawn_distant': '😔'
+        }
+        
         for emotion_name in self.emotional_states.keys():
-            btn = ttk.Button(emotion_buttons_frame, text=emotion_name.title(), width=12,  # Slightly wider
+            emoji = emotion_emojis.get(emotion_name, '💭')
+            display_name = emotion_name.replace('_', ' ').title()
+            btn_text = f"{emoji} {display_name}"
+            
+            btn = ttk.Button(emotion_buttons_frame, text=btn_text, width=15,
+                           style='Emotion.TButton',
                            command=lambda e=emotion_name: self.switch_emotional_state(e))
-            btn.pack(side=tk.LEFT, padx=8)  # More spacing
+            btn.pack(side=tk.LEFT, padx=6)
         
         # Movement recording/playback control - BETTER FORMATTED!
         record_frame = ttk.Frame(emotion_inner)
@@ -386,17 +531,17 @@ class CleanCursorInterface:
         
         # Record button - ULTRA SHORT RECORDINGS FOR STABILITY!
         self.record_btn = ttk.Button(record_buttons_frame, text="🎬 Record Movement (20s)", 
-                                   command=self.start_recording, width=24)  # Consistent width
+                                   command=self.start_recording, width=24, takefocus=False)  # Consistent width
         self.record_btn.pack(pady=5)
         
         # Playback button
         self.playback_btn = ttk.Button(record_buttons_frame, text="▶️ Play Back", 
-                                     command=self.start_playback, width=24)
+                                     command=self.start_playback, width=24, takefocus=False)
         self.playback_btn.pack(pady=5)
         
         # GENERATIVE playback button
         self.generate_btn = ttk.Button(record_buttons_frame, text="🧠 Generate (Markov)", 
-                                     command=self.start_markov_generation, width=24)
+                                     command=self.start_markov_generation, width=24, takefocus=False)
         self.generate_btn.pack(pady=5)
         
         # MANUAL SAVE BUTTON - NEW!
@@ -412,11 +557,12 @@ class CleanCursorInterface:
         self.canvas_width = 300  # Reduced from 400
         self.canvas_height = 200  # Reduced from 400
         
-        canvas_label = ttk.Label(canvas_side_frame, text="🎯 Visual Feedback", font=("Arial", 10, "bold"))
+        canvas_label = ttk.Label(canvas_side_frame, text="🎯 Visual Feedback", font=self.fonts['label'])
         canvas_label.pack(pady=(0, 5))
         
         self.canvas = tk.Canvas(canvas_side_frame, width=self.canvas_width, height=self.canvas_height, 
-                               bg='black', highlightthickness=1, highlightcolor='white')
+                               bg=self.colors['canvas_bg'], highlightthickness=2, 
+                               highlightcolor=self.colors['bg_accent'])
         self.canvas.pack()
         
         # Canvas bindings
@@ -428,19 +574,38 @@ class CleanCursorInterface:
         status_frame = ttk.Frame(emotion_inner)
         status_frame.pack(fill=tk.X, pady=(0, 5))
         
-        # Status - BETTER FORMATTING - Encourage multiple short recordings!
-        self.record_status = ttk.Label(status_frame, text="Ready to record 20s segments (Spacebar)", 
-                                     foreground="gray", width=45)
-        self.record_status.pack(side=tk.LEFT)
+        # Configure grid columns to prevent shifting
+        status_frame.columnconfigure(0, weight=1)  # Left side expands
+        status_frame.columnconfigure(1, weight=0)  # Right side fixed
         
-        # Markov status display 
+        # Status - GRID LAYOUT to prevent UI shifting!
+        self.record_status = ttk.Label(status_frame, text="Ready to record 20s segments (Spacebar)", 
+                                     foreground="gray", font=("Arial", 9))
+        self.record_status.grid(row=0, column=0, sticky="w", padx=(0, 10))
+        
+        # Markov status display - GRID LAYOUT for stability
         self.markov_status = ttk.Label(status_frame, text="No chains built", 
-                                     foreground="gray", font=("Arial", 8), width=25)
-        self.markov_status.pack(side=tk.RIGHT)
+                                     foreground="gray", font=("Arial", 8))
+        self.markov_status.grid(row=0, column=1, sticky="e")
         
         # === DATASET MANAGEMENT - CLEANER INTERFACE! ===
-        dataset_frame = ttk.LabelFrame(emotion_inner, text="📊 Movement Datasets")
-        dataset_frame.pack(fill=tk.X, pady=(10, 5))
+        # Create beautiful custom frame with muted pastel purple styling  
+        dataset_outer = tk.Frame(emotion_inner, bg='#B8A9D9', relief='raised', bd=2)  # Muted purple border
+        dataset_outer.pack(fill=tk.X, padx=20, pady=(10, 5))
+        
+        # Header with cute styling  
+        dataset_header = tk.Frame(dataset_outer, bg='#F0EBFF', height=30)  # Very soft lavender header
+        dataset_header.pack(fill=tk.X, padx=2, pady=(2,0))
+        dataset_header.pack_propagate(False)
+        
+        dataset_title = tk.Label(dataset_header, text="📊 Movement Datasets",
+                                bg='#F0EBFF', fg='#6B46C1',
+                                font=self.fonts['button'])
+        dataset_title.pack(pady=5)
+        
+        # Content area with soft background
+        dataset_frame = tk.Frame(dataset_outer, bg='#FDFCFF', relief='flat')  # Ultra soft purple-white content  
+        dataset_frame.pack(fill=tk.X, padx=2, pady=(0,2))
         
         # Dataset info and controls
         dataset_inner = ttk.Frame(dataset_frame)
@@ -523,8 +688,23 @@ class CleanCursorInterface:
                   width=18).pack(side=tk.LEFT, padx=(10, 0))
         
         # === ENHANCED CYCLING CONTROLS ===
-        cycling_frame = ttk.LabelFrame(emotion_inner, text="🔄 Automatic Cycling Controls")
-        cycling_frame.pack(fill=tk.X, pady=(10, 5))
+        # Create beautiful custom frame with muted pastel purple styling  
+        cycling_outer = tk.Frame(emotion_inner, bg='#B8A9D9', relief='raised', bd=2)  # Muted purple border
+        cycling_outer.pack(fill=tk.X, pady=(10, 5))
+        
+        # Header with cute styling  
+        cycling_header = tk.Frame(cycling_outer, bg='#F0EBFF', height=30)  # Very soft lavender header
+        cycling_header.pack(fill=tk.X, padx=2, pady=(2,0))
+        cycling_header.pack_propagate(False)
+        
+        cycling_title = tk.Label(cycling_header, text="🔄 Automatic Cycling Controls",
+                                bg='#F0EBFF', fg='#6B46C1',
+                                font=self.fonts['button'])
+        cycling_title.pack(pady=5)
+        
+        # Content area with soft background
+        cycling_frame = tk.Frame(cycling_outer, bg='#FDFCFF', relief='flat')  # Ultra soft purple-white content  
+        cycling_frame.pack(fill=tk.X, padx=2, pady=(0,2))
         
         cycling_inner = ttk.Frame(cycling_frame)
         cycling_inner.pack(fill=tk.X, padx=10, pady=8)
@@ -566,9 +746,15 @@ class CleanCursorInterface:
                                          font=("Arial", 8), foreground="#8B5CF6")
         self.cycle_info_label.pack(anchor=tk.W)
         
-        # Progress bar frame - BETTER INTEGRATED!
-        self.progress_frame = ttk.Frame(emotion_inner)
-        self.progress_frame.pack(pady=8, fill=tk.X)  # Better spacing
+        # === PROGRESS BAR AREA (FIXED HEIGHT TO PREVENT UI SHIFTING) ===
+        # Create fixed-height container that doesn't change size when progress bar shows/hides
+        self.progress_container = ttk.Frame(emotion_inner, height=50)  # Fixed height
+        self.progress_container.pack(pady=8, fill=tk.X)
+        self.progress_container.pack_propagate(False)  # Prevent resizing based on contents
+        
+        # Progress frame goes inside the fixed container
+        self.progress_frame = ttk.Frame(self.progress_container)
+        # Don't pack it initially - it will be packed inside the fixed container when needed
         
         # Center the progress bar elements
         progress_center_frame = ttk.Frame(self.progress_frame)
@@ -584,8 +770,8 @@ class CleanCursorInterface:
         self.progress_label = ttk.Label(progress_center_frame, text="", width=18, font=("Arial", 10))
         self.progress_label.pack(side=tk.LEFT, padx=10)
         
-        # Initially hide progress elements
-        self.progress_frame.pack_forget()
+        # Initially hide progress elements (inside the fixed container)
+        # The container stays visible but empty, preventing UI shifts
         
         # Recording state
         self.recording = False
@@ -600,8 +786,23 @@ class CleanCursorInterface:
         self.show_path = tk.BooleanVar(value=True)
         
         # === CONTROL MODES - Better formatted ===
-        mode_frame = ttk.LabelFrame(self.scrollable_frame, text="🎛️ Control Modes")
-        mode_frame.pack(fill=tk.X, padx=15, pady=8)
+        # Create beautiful custom frame with muted pastel purple styling
+        mode_outer = tk.Frame(self.scrollable_frame, bg='#B8A9D9', relief='raised', bd=2)  # Muted purple border
+        mode_outer.pack(fill=tk.X, padx=20, pady=8)
+        
+        # Header with cute styling  
+        mode_header = tk.Frame(mode_outer, bg='#F0EBFF', height=30)  # Very soft lavender header
+        mode_header.pack(fill=tk.X, padx=2, pady=(2,0))
+        mode_header.pack_propagate(False)
+        
+        mode_title = tk.Label(mode_header, text="🎛️ Control Modes",
+                             bg='#F0EBFF', fg='#6B46C1',
+                             font=self.fonts['button'])
+        mode_title.pack(pady=5)
+        
+        # Content area with soft background
+        mode_frame = tk.Frame(mode_outer, bg='#FDFCFF', relief='flat')  # Ultra soft purple-white content  
+        mode_frame.pack(fill=tk.X, padx=2, pady=(0,2))
         
         # Create inner frame for better layout
         mode_inner = ttk.Frame(mode_frame)
@@ -622,8 +823,23 @@ class CleanCursorInterface:
         reset_btn.pack(side=tk.RIGHT, padx=10)
         
         # === FREEZE BEHAVIOR CONTROLS ===
-        freeze_frame = ttk.LabelFrame(self.scrollable_frame, text="❄️ Freeze Behavior")
-        freeze_frame.pack(fill=tk.X, padx=15, pady=8)
+        # Create beautiful custom frame with muted pastel purple styling  
+        freeze_outer = tk.Frame(self.scrollable_frame, bg='#B8A9D9', relief='raised', bd=2)  # Muted purple border
+        freeze_outer.pack(fill=tk.X, padx=20, pady=8)
+        
+        # Header with cute styling  
+        freeze_header = tk.Frame(freeze_outer, bg='#F0EBFF', height=30)  # Very soft lavender header
+        freeze_header.pack(fill=tk.X, padx=2, pady=(2,0))
+        freeze_header.pack_propagate(False)
+        
+        freeze_title = tk.Label(freeze_header, text="❄️ Freeze Behavior",
+                               bg='#F0EBFF', fg='#6B46C1',
+                               font=self.fonts['button'])
+        freeze_title.pack(pady=5)
+        
+        # Content area with soft background
+        freeze_frame = tk.Frame(freeze_outer, bg='#FDFCFF', relief='flat')  # Ultra soft purple-white content  
+        freeze_frame.pack(fill=tk.X, padx=2, pady=(0,2))
         
         # Create inner frame for better spacing
         freeze_inner = ttk.Frame(freeze_frame)
@@ -648,8 +864,23 @@ class CleanCursorInterface:
         freeze_inner.columnconfigure(1, weight=1)
         
         # === WAVE CONTROL PARAMETERS - Better formatted! ===
-        wave_frame = ttk.LabelFrame(self.scrollable_frame, text="🌊 Wave Control Parameters")
-        wave_frame.pack(fill=tk.X, padx=15, pady=8)
+        # Create beautiful custom frame with muted pastel purple styling  
+        wave_outer = tk.Frame(self.scrollable_frame, bg='#B8A9D9', relief='raised', bd=2)  # Muted purple border
+        wave_outer.pack(fill=tk.X, padx=20, pady=8)
+        
+        # Header with cute styling  
+        wave_header = tk.Frame(wave_outer, bg='#F0EBFF', height=30)  # Very soft lavender header
+        wave_header.pack(fill=tk.X, padx=2, pady=(2,0))
+        wave_header.pack_propagate(False)
+        
+        wave_title = tk.Label(wave_header, text="🌊 Wave Control Parameters",
+                             bg='#F0EBFF', fg='#6B46C1',
+                             font=self.fonts['button'])
+        wave_title.pack(pady=5)
+        
+        # Content area with soft background
+        wave_frame = tk.Frame(wave_outer, bg='#FDFCFF', relief='flat')  # Ultra soft purple-white content  
+        wave_frame.pack(fill=tk.X, padx=2, pady=(0,2))
         
         # Create inner frame for better spacing
         wave_inner = ttk.Frame(wave_frame)
@@ -702,6 +933,204 @@ class CleanCursorInterface:
                                    font=("Arial", 8), foreground="gray")
         servo_info_label.grid(row=5, column=0, columnspan=3, sticky=tk.W, padx=5, pady=(0, 5))
     
+    def load_custom_images(self):
+        """Load custom images if they exist in the directory."""
+        image_files = {
+            'logo': ['logo.png', 'logo.gif', 'icon.png', 'logo.jpg'],
+            'background': ['background.png', 'bg.png', 'background.jpg', 'wallpaper.png'],
+            'header': ['header.png', 'banner.png', 'header.jpg'],
+            'emotion_icons': ['emotions.png', 'emotions.gif'],
+            'decorative': ['flower.png', 'star.png', 'heart.png', 'sparkle.png']
+        }
+        
+        for image_type, filenames in image_files.items():
+            for filename in filenames:
+                if os.path.exists(filename):
+                    try:
+                        if PIL_AVAILABLE:
+                            # Use Pillow for better image handling
+                            img = Image.open(filename)
+                            
+                            # Different sizes for different purposes
+                            if image_type == 'logo':
+                                img = img.resize((48, 48), Image.Resampling.LANCZOS)
+                            elif image_type == 'header':
+                                img = img.resize((600, 80), Image.Resampling.LANCZOS)
+                            elif image_type == 'background':
+                                # Make background much larger to ensure full coverage
+                                img = img.resize((800, 1500), Image.Resampling.LANCZOS)
+                            elif image_type == 'decorative':
+                                img = img.resize((24, 24), Image.Resampling.LANCZOS)
+                            else:
+                                img = img.resize((32, 32), Image.Resampling.LANCZOS)
+                                
+                            self.images[image_type] = ImageTk.PhotoImage(img)
+                        else:
+                            # Fallback to basic tkinter
+                            self.images[image_type] = tk.PhotoImage(file=filename)
+                        print(f"[IMAGE] Loaded custom image: {filename} as {image_type}")
+                        break
+                    except Exception as e:
+                        print(f"[WARNING] Could not load image {filename}: {e}")
+        
+        # Create some cute default images if no custom ones found
+        if 'decorative' not in self.images:
+            self.create_default_decorative_images()
+
+    def apply_background_image(self):
+        """Apply background image to the scrollable area."""
+        if hasattr(self, 'images') and 'background' in self.images:
+            try:
+                # Place the background image in the scrollable frame area
+                self.bg_label = tk.Label(self.scrollable_frame, image=self.images['background'])
+                # Place the background image to cover the full 750px window
+                self.bg_label.place(x=-100, y=0, width=800, height=1500)  # Oversized and offset to guarantee full coverage
+                # Send it to the back so all other widgets appear on top
+                self.bg_label.lower()
+                
+                # Make the scrollable frame completely transparent
+                self.scrollable_frame.configure(bg='')  # Completely transparent
+                
+                print("[OK] Background image applied with full coverage!")
+                self.has_background = True
+                
+            except Exception as e:
+                print(f"[ERROR] Failed to apply background image: {e}")
+        else:
+            print("[INFO] No background image found")
+            self.has_background = False
+            
+    def make_frames_transparent(self):
+        """Make all frames transparent when background image is present."""
+        if hasattr(self, 'has_background') and self.has_background:
+            # Update the color scheme for transparency
+            self.bg_outer_frame = '#B8A9D9'      # Keep purple border
+            self.bg_header_frame = '#F8F5FF'     # Very light lavender (almost transparent)
+            self.bg_content_frame = '#FDFDFF'    # Almost white (almost transparent)
+            
+            # Find all frames and update their colors
+            try:
+                self.update_all_frame_colors()
+                print("[OK] Made frames transparent for background image!")
+            except Exception as e:
+                print(f"[WARNING] Could not update frame transparency: {e}")
+    
+    def update_all_frame_colors(self):
+        """Update all existing frames with new color scheme."""
+        # This will recursively update all frames in the interface
+        for widget in self.scrollable_frame.winfo_children():
+            if isinstance(widget, tk.Frame):
+                # Update main frame colors
+                if widget.cget('bg') in ['#E8C5E8', '#FDFCFF']:  # If it's one of our custom frames
+                    widget.configure(bg=self.bg_content_frame)
+                    
+                # Update child frames
+                for child in widget.winfo_children():
+                    if isinstance(child, tk.Frame):
+                        if child.cget('bg') in ['#E8C5E8', '#FDFCFF']:
+                            child.configure(bg=self.bg_content_frame)
+            
+    def update_frame_transparency(self):
+        """Update frame backgrounds to be semi-transparent when background image is present."""
+        if hasattr(self, 'has_background') and self.has_background:
+            # For frames with background image - use lighter, more transparent-looking versions
+            self.bg_outer_frame = '#B8A9D9'    # Keep purple border solid but make it thinner
+            self.bg_header_frame = '#F4EEFF'   # Very light lavender for headers 
+            self.bg_content_frame = '#FEFEFF'   # Almost white for content areas
+        else:
+            # Original solid colors when no background
+            self.bg_outer_frame = '#B8A9D9'    # Solid purple border
+            self.bg_header_frame = '#E8C5E8'   # Solid header
+            self.bg_content_frame = '#FDFCFF'  # Solid content
+            
+    def create_styled_frame(self, parent, frame_type='outer'):
+        """Create a styled frame with appropriate background based on image presence."""
+        if not hasattr(self, 'has_background'):
+            self.has_background = False
+            self.update_frame_transparency()
+            
+        if frame_type == 'outer':
+            return tk.Frame(parent, bg=self.bg_outer_frame, relief='raised', bd=1 if self.has_background else 2)
+        elif frame_type == 'header':
+            return tk.Frame(parent, bg=self.bg_header_frame, relief='flat', bd=0)
+        elif frame_type == 'content':
+            return tk.Frame(parent, bg=self.bg_content_frame, relief='flat', bd=0)
+        else:
+            return tk.Frame(parent, bg=self.bg_outer_frame, relief='raised', bd=2)
+
+    def create_default_decorative_images(self):
+        """Create cute default decorative images using code."""
+        try:
+            if PIL_AVAILABLE:
+                # Create a cute heart shape
+                heart_img = Image.new('RGBA', (24, 24), (0, 0, 0, 0))
+                heart_pixels = [
+                    "      ████████      ",
+                    "    ██████████████  ",
+                    "  ████████████████  ",
+                    "  ████████████████  ",
+                    "    ██████████████  ",
+                    "      ████████████  ",
+                    "        ████████    ",
+                    "          ████      "
+                ]
+                # This is just a demo - you can get much fancier!
+                self.images['heart'] = ImageTk.PhotoImage(heart_img)
+                print("💖 Created cute default heart image!")
+        except Exception as e:
+            print(f"⚠️ Could not create default images: {e}")
+    
+    def setup_custom_fonts(self):
+        """Setup beautiful custom fonts for the interface."""
+        # Try different cute font families (fallback to safe defaults)
+        self.fonts = {
+            'title': self.get_best_font(['Segoe UI', 'Comic Sans MS', 'Arial'], 16, 'bold'),
+            'subtitle': self.get_best_font(['Segoe UI', 'Calibri', 'Arial'], 10, 'normal'),
+            'button': self.get_best_font(['Segoe UI', 'Tahoma', 'Arial'], 9, 'bold'),
+            'label': self.get_best_font(['Segoe UI', 'Calibri', 'Arial'], 9, 'normal'),
+            'small': self.get_best_font(['Segoe UI', 'Arial'], 8, 'normal'),
+            'canvas': self.get_best_font(['Consolas', 'Courier New', 'Arial'], 9, 'bold')
+        }
+        print(f"🔤 Using fonts: {[f[0] for f in self.fonts.values()]}")
+    
+    def get_best_font(self, font_list, size, weight):
+        """Get the best available font from a preference list."""
+        import tkinter.font as tkfont
+        
+        for font_name in font_list:
+            try:
+                # Test if the font exists by creating it
+                test_font = tkfont.Font(family=font_name, size=size, weight=weight)
+                return (font_name, size, weight)
+            except:
+                continue
+        
+        # Fallback to Arial if nothing else works
+        return ('Arial', size, weight)
+
+    def create_tooltip(self, widget, text):
+        """Create a cute tooltip for a widget."""
+        def on_enter(event):
+            tooltip = tk.Toplevel()
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+            tooltip.configure(bg=self.colors['bg_accent'])
+            
+            label = tk.Label(tooltip, text=text, background=self.colors['bg_accent'],
+                           foreground=self.colors['text_main'], font=('Arial', 8),
+                           relief='solid', borderwidth=1, padx=8, pady=4)
+            label.pack()
+            
+            widget.tooltip = tooltip
+        
+        def on_leave(event):
+            if hasattr(widget, 'tooltip'):
+                widget.tooltip.destroy()
+                del widget.tooltip
+        
+        widget.bind("<Enter>", on_enter)
+        widget.bind("<Leave>", on_leave)
+
     def on_dataset_selected(self, event=None):
         """Handle dataset selection from dropdown."""
         selected = self.dataset_var.get()
@@ -1134,8 +1563,61 @@ class CleanCursorInterface:
         elif dataset_options:
             self.dataset_var.set(dataset_options[0])
     
+    def refresh_serial_ports(self):
+        """Auto-detect available serial ports (works on Windows, Linux, macOS)."""
+        try:
+            # Get all available serial ports
+            ports = list_ports.comports()
+            port_list = [port.device for port in ports]
+            
+            # Store available ports
+            self.available_ports = port_list
+            
+            # Create dropdown options
+            if port_list:
+                options = ["Auto"] + port_list
+                print(f"🔍 Found {len(port_list)} serial ports: {port_list}")
+            else:
+                options = ["No ports found"]
+                print("⚠️ No serial ports detected")
+            
+            # Update combobox
+            if hasattr(self, 'port_combo'):
+                self.port_combo['values'] = options
+                
+                # Keep current selection if still valid, otherwise default to Auto
+                current = self.selected_port.get()
+                if current in options:
+                    self.port_combo.set(current)
+                else:
+                    self.port_combo.set("Auto" if port_list else "No ports found")
+            
+        except Exception as e:
+            print(f"❌ Error detecting serial ports: {e}")
+            if hasattr(self, 'port_combo'):
+                self.port_combo['values'] = ["Error detecting ports"]
+                self.port_combo.set("Error detecting ports")
+    
+    def get_selected_port(self):
+        """Get the currently selected port, with auto-detection logic."""
+        selected = self.selected_port.get()
+        
+        if selected == "Auto":
+            # Auto-detect: prefer COM3 if available, otherwise first available port
+            if self.available_ports:
+                if "COM3" in self.available_ports:
+                    return "COM3"
+                else:
+                    return self.available_ports[0]
+            else:
+                return "COM3"  # Fallback
+        elif selected in ["No ports found", "Error detecting ports"]:
+            return "COM3"  # Fallback
+        else:
+            return selected
+
     def toggle_connection(self):
-        """Toggle hand controller connection - FIXED LOGIC."""
+        """Toggle hand controller connection with auto-detected port."""
         if not HAND_CONTROLLER_AVAILABLE:
             self.status_label.config(text="❌ Controller unavailable")
             print("⚠️ Hand controller not available - simulation mode")
@@ -1143,24 +1625,29 @@ class CleanCursorInterface:
         
         if not self.connected:
             try:
-                # CORRECT CONNECTION: Initialize HandExpressionController like the original
+                # Get the selected port (with auto-detection)
+                port = self.get_selected_port()
+                print(f"🔌 Attempting connection to {port}...")
+                
+                # Initialize HandExpressionController with selected port
                 self.hand_controller = HandExpressionController(
-                    port="COM3",  # Your Arduino port
+                    port=port,
                     baudrate=9600,
                     clean_output=True
                 )
-                # The connection is established in __init__, check if serial connection exists
+                
+                # Check if connection was successful
                 if self.hand_controller.serial_connection:
                     # Enable manual override to ensure our commands are processed
                     self.hand_controller.enable_manual_override()
                     self.connected = True
-                    self.status_label.config(text="✅ Connected")
+                    self.status_label.config(text=f"✅ Connected ({port})")
                     self.connect_btn.config(text="Disconnect")
-                    print("✅ Connected to hand controller on COM3")
+                    print(f"✅ Connected to hand controller on {port}")
                     print("🎮 Manual override enabled - ready for cursor control")
                 else:
                     self.status_label.config(text="❌ Connection failed")
-                    print("❌ Failed to connect to COM3")
+                    print(f"❌ Failed to connect to {port}")
             except Exception as e:
                 self.status_label.config(text="❌ Connection error")
                 print(f"❌ Connection error: {e}")
@@ -1263,17 +1750,17 @@ class CleanCursorInterface:
         # Don't interfere with text input
         if self.text_field_has_focus:
             print("📝 Spacebar ignored - text field has focus")
-            return
+            return "break"  # Prevent event propagation
         
         # Don't interfere with generation
         if self.generating:
             print("🧠 Spacebar ignored - Markov generation in progress")
-            return
+            return "break"  # Prevent event propagation
         
         # Don't interfere with playback
         if self.playing_back:
             print("▶️ Spacebar ignored - playback in progress")
-            return
+            return "break"  # Prevent event propagation
             
         # Safe to toggle recording
         try:
@@ -1286,6 +1773,8 @@ class CleanCursorInterface:
         except Exception as e:
             print(f"❌ Error handling spacebar: {e}")
             # Don't let errors break the interface
+        
+        return "break"  # Always prevent spacebar from propagating to other widgets
     
     def on_key_press(self, event):
         """SIMPLIFIED keyboard press for finger control - NO TIMERS, NO ACCUMULATION!"""
@@ -1730,11 +2219,15 @@ class CleanCursorInterface:
         for i in range(self.num_fingers):
             finger_x = condensed_area_start + ((i + 0.5) / self.num_fingers) * condensed_area_width
             
-            # Colors based on control mode (pre-calculated)
+            # Colors based on control mode (using our pink theme)
             if self.finger_locks[i]:
-                bar_color, outline_color, position_color = "orange", "yellow", "gold"
+                bar_color = self.colors['bg_accent']
+                outline_color = self.colors['button_bg'] 
+                position_color = self.colors['button_hover']
             else:
-                bar_color, outline_color, position_color = "gray30", "white", "lime"
+                bar_color = self.colors['bg_frame']
+                outline_color = self.colors['text_main']
+                position_color = self.colors['success']
             
             # Main bar outline
             self.canvas.create_rectangle(
@@ -1752,7 +2245,7 @@ class CleanCursorInterface:
             self.canvas.create_rectangle(
                 finger_x-bar_width//2, finger_y_base-pos_height, 
                 finger_x+bar_width//2, finger_y_base,
-                fill=position_color, outline="yellow", width=1)
+                fill=position_color, outline=self.colors['text_accent'], width=1)
             
             # Target indicator (optimized calculation)
             if self.reverse_vertical.get():
@@ -1771,51 +2264,51 @@ class CleanCursorInterface:
             # Simplified finger labels (less text objects)
             finger_label = f"F{i+1}🔒" if self.finger_locks[i] else f"F{i+1}"
             self.canvas.create_text(finger_x, finger_y_base+10, text=finger_label, 
-                                  fill="white", font=("Arial", 8, "bold"))
+                                  fill=self.colors['text_main'], font=("Arial", 8, "bold"))
         
         # Essential text only - avoid expensive string formatting
         self._draw_essential_text(canvas_width, canvas_height)
     
     def _draw_essential_text(self, canvas_width, canvas_height):
         """Draw only essential text information to avoid performance issues."""
-        # Mode indicator (simplified)
+        # Mode indicator (simplified) with custom font
         reverse_status = " [REV]" if self.reverse_vertical.get() else ""
         mode_text = f"Hybrid Control{reverse_status}"
-        self.canvas.create_text(10, 10, text=mode_text, fill="white", anchor="nw", 
-                              font=("Arial", 10, "bold"))
+        self.canvas.create_text(10, 10, text=mode_text, fill=self.colors['text_main'], anchor="nw", 
+                              font=self.fonts['canvas'])
         
-        # Current emotion (simplified)
+        # Current emotion (simplified) with custom font
         emotion_text = f"Emotion: {self.current_emotional_state.replace('_', ' ').title()}"
-        self.canvas.create_text(10, 25, text=emotion_text, fill="yellow", anchor="nw",
-                              font=("Arial", 9))
+        self.canvas.create_text(10, 25, text=emotion_text, fill=self.colors['text_accent'], anchor="nw",
+                              font=self.fonts['small'])
         
         # Status indicators (only when relevant - reduced text objects)
         status_y = 40
         if self.text_field_has_focus:
-            self.canvas.create_text(10, status_y, text="📝 TEXT INPUT", fill="red", anchor="nw",
+            self.canvas.create_text(10, status_y, text="📝 TEXT INPUT", fill=self.colors['error'], anchor="nw",
                                   font=("Arial", 9, "bold"))
         elif self.pressed_keys:
             keys_text = f"Keys: {','.join(sorted(self.pressed_keys)).upper()}"
-            self.canvas.create_text(10, status_y, text=keys_text, fill="orange", anchor="nw",
+            self.canvas.create_text(10, status_y, text=keys_text, fill=self.colors['warning'], anchor="nw",
                                   font=("Arial", 9))
         elif self.is_frozen:
-            self.canvas.create_text(10, status_y, text="❄️ FROZEN", fill="cyan", anchor="nw",
+            self.canvas.create_text(10, status_y, text="❄️ FROZEN", fill=self.colors['text_accent'], anchor="nw",
                                   font=("Arial", 9, "bold"))
         elif self.recording:
-            self.canvas.create_text(10, status_y, text="🎬 RECORDING", fill="red", anchor="nw",
+            self.canvas.create_text(10, status_y, text="🎬 RECORDING", fill=self.colors['error'], anchor="nw",
                                   font=("Arial", 9, "bold"))
         elif self.playing_back:
-            self.canvas.create_text(10, status_y, text="▶️ PLAYBACK", fill="green", anchor="nw",
+            self.canvas.create_text(10, status_y, text="▶️ PLAYBACK", fill=self.colors['success'], anchor="nw",
                                   font=("Arial", 9))
         elif self.generating:
-            self.canvas.create_text(10, status_y, text="🧠 GENERATING", fill="purple", anchor="nw",
+            self.canvas.create_text(10, status_y, text="🧠 GENERATING", fill=self.colors['text_accent'], anchor="nw",
                                   font=("Arial", 9))
         
         # Servo range (bottom right, simplified)
         servo_range = self.servo_range.get()
         range_text = f"Range: ±{servo_range:.0f}°"
         self.canvas.create_text(canvas_width-10, canvas_height-10, text=range_text, 
-                              fill="lightgreen", anchor="se", font=("Arial", 9))
+                              fill=self.colors['text_main'], anchor="se", font=("Arial", 9))
     
     def send_to_hand_controller(self):
         """Send positions to hand controller - FIXED INTERFACE."""
@@ -1937,8 +2430,8 @@ class CleanCursorInterface:
         
         # 5. Update UI status
         if hasattr(self, 'record_status'):
-            self.record_status.config(text="All data cleared - ready to record fresh datasets", foreground="green")
-            self.root.after(3000, lambda: self.record_status.config(text="Ready to record (Spacebar)", foreground="gray"))
+            self.record_status.config(text="All data cleared - ready to record!", foreground="green")
+            self.root.after(3000, lambda: self.record_status.config(text="Ready to record 20s segments (Spacebar)", foreground="gray"))
         
         print("🗑️ ALL DATA CLEARED - Starting completely fresh!")
         print("💡 TIP: Record new movements for each emotion to build fresh, compatible datasets")
@@ -1975,11 +2468,11 @@ class CleanCursorInterface:
         self.record_btn.config(text="⏹️ Stop Recording")
         self.playback_btn.config(text="▶️ Play Back")        # Reset playback button
         self.generate_btn.config(text="🧠 Generate (Markov)") # Reset generate button
-        self.record_status.config(text=f"Recording {self.current_emotional_state}... (Spacebar to stop)", foreground="red")
+        self.record_status.config(text="🎬 RECORDING... (Spacebar to stop)", foreground="red")
         self.markov_status.config(text="Capturing positions...", foreground="orange")
         
-        # Show and reset progress bar - FIXED: Show correct 20s duration!
-        self.progress_frame.pack(pady=8, fill=tk.X)  # Updated padding
+        # Show progress bar inside the fixed container (no UI shift!)
+        self.progress_frame.pack(expand=True, fill=tk.BOTH)  # Fill the fixed container
         self.progress_var.set(0)
         self.progress_label.config(text="0:00 / 0:20 (0%)")  # FIXED: 20 seconds, not 2 minutes!
         
@@ -2107,14 +2600,14 @@ class CleanCursorInterface:
             self.root.after_cancel(self.recording_timer)
             self.recording_timer = None
             
-        # Hide progress bar
+        # Hide progress bar (inside fixed container - no UI shift!)
         self.progress_frame.pack_forget()
             
         duration = time.time() - self.record_start_time
         sample_count = len(self.recorded_positions)
         
         self.record_btn.config(text="🎬 Record Movement (20s)")
-        self.record_status.config(text=f"Recorded {sample_count} samples in {duration:.1f}s", foreground="green")
+        self.record_status.config(text=f"✅ Recorded {sample_count} samples ({duration:.1f}s)", foreground="green")
         
         print(f"🎬 Stopped recording. Captured {sample_count} position samples in {duration:.1f} seconds")
         print(f"📊 Sample rate: {sample_count/duration:.1f} Hz")
@@ -2293,9 +2786,9 @@ class CleanCursorInterface:
         self.save_recording()
         
         # Update UI
-        save_msg = f"Saved {len(movements)} servo samples"
+        save_msg = f"💾 Saved {len(movements)} samples"
         if has_markov:
-            save_msg += " + Markov chain"
+            save_msg += " + chain"
         self.record_status.config(text=save_msg, foreground="green")
     
     def refresh_datasets(self):
@@ -2936,7 +3429,7 @@ File: {dataset['filename']}
         self.playback_btn.config(text="⏹️ Stop Playback")
         self.record_btn.config(text="🎬 Record Movement (20s)")  # Reset record button
         self.generate_btn.config(text="🧠 Generate (Markov)")     # Reset generate button
-        self.record_status.config(text=f"Playing back {self.current_emotional_state}...", foreground="blue")
+        self.record_status.config(text="▶️ PLAYING BACK...", foreground="blue")
         
         print(f"▶️ Started playback of {len(self.current_playback)} movements for {self.current_emotional_state}")
     
@@ -2944,7 +3437,7 @@ File: {dataset['filename']}
         """Stop playback."""
         self.playing_back = False
         self.playback_btn.config(text="▶️ Play Back")
-        self.record_status.config(text="Playback stopped", foreground="gray")
+        self.record_status.config(text="Ready to record 20s segments (Spacebar)", foreground="gray")
         print("⏹️ Playback stopped")
     
     def update_playback(self):
@@ -3435,7 +3928,7 @@ File: {dataset['filename']}
 
 def main():
     """Main function to start the interface."""
-    print("� Starting Clean Emotional Hand Control...")
+    print("[START] Starting Clean Emotional Hand Control...")
     
     # Create and run the interface
     interface = CleanCursorInterface()
@@ -3444,9 +3937,9 @@ def main():
         # Start the tkinter main loop
         interface.root.mainloop()
     except KeyboardInterrupt:
-        print("\n⚠️ Interrupted by user")
+        print("\n[INFO] Interrupted by user")
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"[ERROR] Error: {e}")
         traceback.print_exc()
     finally:
         # Cleanup
@@ -3455,7 +3948,7 @@ def main():
                 interface.hand_controller.cleanup()
             except:
                 pass
-        print("🔌 Clean shutdown complete")
+        print("[INFO] Clean shutdown complete")
 
 
 if __name__ == "__main__":
