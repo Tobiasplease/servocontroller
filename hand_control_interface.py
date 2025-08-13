@@ -247,11 +247,12 @@ class CleanCursorInterface:
         # Wave control parameters - KEEP - working values for smooth wave-based control
         self.wave_strength = tk.DoubleVar(value=2.0)
         self.gravity_width = tk.DoubleVar(value=0.4)
-        self.default_position = tk.DoubleVar(value=120.0)  # Changed from 90 to 120
+        self.default_position = tk.DoubleVar(value=90.0)
         self.servo_range = tk.DoubleVar(value=60.0)  # ±60 degrees from default for better control precision
         
         # Control toggles - simplified
         self.reverse_vertical = tk.BooleanVar(value=True)  # Default to reversed (better usability)
+        self.preserve_original_timing = tk.BooleanVar(value=False)  # Toggle for raw vs smooth Markov generation
         
         # Person detection simulation for testing integration behavior
         self.person_detected = tk.BooleanVar(value=False)
@@ -317,9 +318,9 @@ class CleanCursorInterface:
         self.record_interval = 0.025  # 40 Hz - much higher resolution for easing capture
         self.recorded_positions = []  # Current recording session positions
         
-        # MEMORY MANAGEMENT for recording system - EXTENDED SEGMENTS FOR RICHER DATA!
-        self.max_recording_points = 2400   # 60 seconds at 40Hz (tripled for richer datasets!)
-        self.recording_buffer_cleanup_interval = 50   # Clean up every 50 points (more frequent)
+        # MEMORY MANAGEMENT for recording system - OPTIMIZED FOR STABILITY
+        self.max_recording_points = 800   # 20 seconds at 40Hz - stable duration with rich data
+        self.recording_buffer_cleanup_interval = 50   # Clean up every 50 points
         self.recording_point_counter = 0
         
         # Markov chain generation state
@@ -346,11 +347,12 @@ class CleanCursorInterface:
         self.current_dataset_index = 0  # Index in available datasets for current emotion
         
         # Dataset transition variables for smooth transitions
+        self.transitioning_to_dataset = False
         self.dataset_transitioning = False
-        self.dataset_transition_target = None
-        self.dataset_transition_start_time = 0
-        self.dataset_transition_duration = 3.0  # 3 seconds for smooth dataset transitions
-        self.previous_markov_chain = None  # Store previous chain for interpolation
+        self.transition_start_positions = None
+        self.transition_target_positions = None
+        self.transition_start_time = 0
+        self.transition_duration = 1.5  # 1.5 seconds smooth ease
         
         # === AUTO EMOTION CYCLING SYSTEM ===
         self.emotion_cycling_enabled = tk.BooleanVar(value=False)
@@ -387,14 +389,14 @@ class CleanCursorInterface:
             self.markov_chains.clear()
         
         print(f"🧹 Startup cleanup complete: Cleared {total_points_before} old recording points")
-        print(f"💾 Memory reset: Fresh session with max {self.max_recording_points} points per segment (60s each)")
+        print(f"💾 Memory reset: Fresh session with max {self.max_recording_points} points per segment (20s each)")
         
         print("🎯 Clean Emotional Hand Control initialized")
         print("🎮 Direct wave-based cursor→servo control ready")
         print("😊 5 emotional states available for testing")
         print(f"📐 FIXED canvas dimensions: 480x200 (no more resizing)")
         print(f"🎯 Condensed control area: 25%-75% of canvas width for precise movement")
-        print("🎯 Extended 60s recordings capture more movement patterns and hesitation details!")
+        print("🎯 Rich 20s recordings with full data complexity for quality datasets!")
         
         # Initialize the cleaner dataset display
         self.update_emotion_dataset_display()
@@ -543,7 +545,7 @@ class CleanCursorInterface:
         record_buttons_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
         
         # Record button - EXTENDED RECORDINGS FOR RICHER DATA!
-        self.record_btn = ttk.Button(record_buttons_frame, text="🎬 Record Movement (60s)", 
+        self.record_btn = ttk.Button(record_buttons_frame, text="🎬 Record Movement (20s)", 
                                    command=self.start_recording, width=24, takefocus=False)  # Consistent width
         self.record_btn.pack(pady=5)
         
@@ -616,7 +618,7 @@ class CleanCursorInterface:
         status_frame.columnconfigure(1, weight=0)  # Right side fixed
         
         # Status - GRID LAYOUT to prevent UI shifting!
-        self.record_status = ttk.Label(status_frame, text="Ready to record 60s segments (Spacebar)", 
+        self.record_status = ttk.Label(status_frame, text="Ready to record 20s segments (Spacebar)", 
                                      foreground="gray", font=("Arial", 9))
         self.record_status.grid(row=0, column=0, sticky="w", padx=(0, 10))
         
@@ -1398,60 +1400,149 @@ class CleanCursorInterface:
         print(f"🎭 Emotion display updated: {self.current_emotional_state}")
     
     def start_dataset_transition(self, target_dataset, target_dataset_info, emotion):
-        """Start smooth transition to target dataset."""
-        # Store current Markov chain for interpolation
-        if emotion in self.markov_chains:
-            self.previous_markov_chain = self.markov_chains[emotion].copy()
-        
+        """Start simple smooth transition to new dataset."""
+        # Store where we're starting from
+        self.transition_start_positions = self.finger_positions.copy()
+        self.dataset_transition_start_time = time.time()
+        self.dataset_transition_duration = 1.5  # 1.5 seconds smooth ease
         self.dataset_transitioning = True
+        
+        # Store transition target info (but don't load new chain yet!)
         self.dataset_transition_target = {
             'display_name': target_dataset,
             'dataset_info': target_dataset_info,
             'emotion': emotion
         }
-        self.dataset_transition_start_time = time.time()
         
-        print(f"🌊 Starting smooth dataset transition to {target_dataset}")
+        # Store current finger positions as transition start point
+        self.transition_start_positions = self.finger_positions.copy()
         
-        # Load new Markov chain but don't apply it yet
-        if self.load_markov_chain_from_dataset(target_dataset_info, emotion):
-            print(f"🔗 Loaded new Markov chain for dataset transition")
+        # Get first position from new dataset as target
+        target_data = target_dataset_info['data']
+        recordings = target_data.get('recordings', [])
+        if recordings:
+            first_recording = recordings[0]
+            self.transition_target_positions = [
+                first_recording.get('servo1', 90),
+                first_recording.get('servo2', 90), 
+                first_recording.get('servo3', 90),
+                first_recording.get('servo4', 90)
+            ]
         else:
-            print(f"⚠️ Failed to load Markov chain for dataset transition")
+            # Fallback to current positions if no recordings
+            self.transition_target_positions = self.finger_positions.copy()
+        
+        print(f"🌊 Starting smooth transition to {target_dataset} (1.5s ease)")
+        print(f"🎯 Transition: {self.transition_start_positions} → {self.transition_target_positions}")
+        
+        # DON'T load new chain yet - keep current generation running
     
     def update_dataset_transition(self):
-        """Update smooth dataset transition progress."""
+        """Update smooth dataset transition with position interpolation."""
         if not self.dataset_transitioning:
             return
         
         current_time = time.time()
         elapsed = current_time - self.dataset_transition_start_time
+        progress = elapsed / self.dataset_transition_duration
         
-        if elapsed >= self.dataset_transition_duration:
-            # Complete transition
+        if progress >= 1.0:
+            # Complete transition - NOW load the new chain
             target = self.dataset_transition_target
-            self.dataset_var.set(target['display_name'])
-            self.active_datasets[target['emotion']] = target['dataset_info']['filename']
+            
+            print(f"✅ Transition complete - loading new chain")
+            if self.load_markov_chain_from_dataset(target['dataset_info'], target['emotion']):
+                print(f"✅ New dataset loaded: {target['display_name']}")
+                self.dataset_var.set(target['display_name'])
+                self.active_datasets[target['emotion']] = target['dataset_info']['filename']
+            else:
+                print(f"❌ Failed to load dataset: {target['display_name']}")
+            
             self.dataset_transitioning = False
-            self.previous_markov_chain = None
-            
-            print(f"✅ Dataset transition complete: {target['display_name']}")
-            
-            # Restart Markov if needed
-            if self.generating:
-                self.restart_markov_with_new_dataset()
+            print("🏁 Dataset transition finished")
         else:
-            # During transition, blend between datasets using easing
-            progress = elapsed / self.dataset_transition_duration
-            eased_progress = self.ease_in_out_cubic(progress)
+            # Interpolate finger positions during transition
+            # Use smooth easing (ease-in-out)
+            t = progress
+            smooth_t = t * t * (3.0 - 2.0 * t)  # Smooth step function
             
-            # Interpolate generation behavior between old and new datasets
-            self.interpolate_dataset_behavior(eased_progress)
+            # Override finger positions with interpolated values
+            for i in range(4):
+                start_pos = self.transition_start_positions[i]
+                target_pos = self.transition_target_positions[i]
+                interpolated_pos = start_pos + (target_pos - start_pos) * smooth_t
+                self.finger_positions[i] = interpolated_pos
+            
+            print(f"🔄 Transition {progress:.1%}: positions={[f'{pos:.0f}' for pos in self.finger_positions]}")
+            
+            # Send interpolated positions to servos
+            self.send_to_hand_controller()
+    
+    def apply_three_phase_transition(self, overall_progress):
+        """Apply direct smooth ease to closest position in new dataset."""
+        # Initialize the closest target position if we haven't yet
+        if not hasattr(self, 'transition_target_positions'):
+            self.transition_target_positions = self.find_closest_position_in_new_dataset()
+            print(f"🎯 Found closest position in new dataset: {self.transition_target_positions}")
+        
+        # Direct smooth ease from start to target
+        eased_progress = self.ease_in_out_cubic(overall_progress)
+        
+        # Interpolate from starting positions to closest target position  
+        for i in range(4):
+            start_pos = self.transition_start_positions[i]
+            target_pos = self.transition_target_positions[i]
+            self.finger_positions[i] = start_pos + (target_pos - start_pos) * eased_progress
+        
+        if overall_progress < 0.1:  # Only print at start
+            print(f"� Direct ease transition: {overall_progress:.1%} complete")
+    
+    def find_closest_position_in_new_dataset(self):
+        """Find the position in the new dataset closest to current finger positions."""
+        current_pos = self.transition_start_positions
+        
+        # Get the new dataset's Markov chain
+        if hasattr(self, 'current_emotional_state') and self.current_emotional_state in self.markov_chains:
+            chain = self.markov_chains[self.current_emotional_state]
+            if chain and isinstance(chain, dict):
+                # Handle different chain formats
+                transitions = None
+                if 'servo_transitions' in chain:
+                    transitions = chain['servo_transitions']
+                elif 'cursor_transitions' in chain:
+                    transitions = chain['cursor_transitions']
+                elif 'transitions' in chain:
+                    transitions = chain['transitions']
+                
+                if transitions and isinstance(transitions, dict):
+                    closest_distance = float('inf')
+                    closest_position = current_pos.copy()  # Fallback to current position
+                    
+                    # Check all states in the new dataset
+                    for state_key in transitions.keys():
+                        parts = state_key.split('|')
+                        if len(parts) >= 4:
+                            try:
+                                positions = [float(parts[i]) for i in range(4)]
+                                # Calculate Euclidean distance
+                                distance = sum((positions[i] - current_pos[i])**2 for i in range(4))**0.5
+                                if distance < closest_distance:
+                                    closest_distance = distance
+                                    closest_position = positions
+                            except (ValueError, IndexError):
+                                continue
+                    
+                    print(f"📏 Closest position distance: {closest_distance:.1f}° from current position")
+                    return closest_position
+        
+        # Fallback - stay at current position if no valid dataset found
+        print("⚠️ No valid dataset found - staying at current position")
+        return current_pos.copy()
     
     def interpolate_dataset_behavior(self, progress):
         """Smoothly interpolate between old and new dataset behaviors during transition."""
-        if not self.dataset_transitioning or not self.generating:
-            return
+        # Temporarily disabled - transitions not working properly
+        return
         
         # During transition, modify generation speed and easing to blend behaviors
         # This creates a smooth transition feel without abrupt behavior changes
@@ -1471,13 +1562,115 @@ class CleanCursorInterface:
         """Smooth easing function for transitions."""
         return 4 * t * t * t if t < 0.5 else 1 - pow(-2 * t + 2, 3) / 2
     
+    def initialize_markov_state_for_new_dataset(self):
+        """Initialize valid Markov states for the new dataset so generation can continue."""
+        if not hasattr(self, 'current_emotional_state') or self.current_emotional_state not in self.markov_chains:
+            return
+            
+        chain = self.markov_chains[self.current_emotional_state]
+        if not chain:
+            return
+            
+        # Get transitions from the new dataset
+        transitions = None
+        if 'servo_transitions' in chain:
+            transitions = chain['servo_transitions']
+        elif 'cursor_transitions' in chain:
+            transitions = chain['cursor_transitions']
+        elif 'transitions' in chain:
+            transitions = chain['transitions']
+            
+        if transitions and len(transitions) > 0:
+            # Pick any valid starting state from the new dataset
+            import random
+            start_state_key = random.choice(list(transitions.keys()))
+            self.current_markov_state = start_state_key
+            
+            # For second-order chains, set a valid previous state too
+            if chain.get('second_order_enabled', False):
+                self.prev_markov_state = start_state_key  # Simple approach
+                
+            print(f"🎯 Initialized Markov state for new dataset: {start_state_key}")
+        else:
+            print("⚠️ No valid transitions found in new dataset")
+
+    def update_markov_state_from_current_position(self):
+        """Update Markov state to match current finger positions without restarting."""
+        if not hasattr(self, 'current_emotional_state') or self.current_emotional_state not in self.markov_chains:
+            return
+            
+        chain = self.markov_chains[self.current_emotional_state]
+        if not chain:
+            return
+            
+        # Find the state in the new dataset that best matches our current position
+        current_pos = self.finger_positions
+        best_match_key = None
+        closest_distance = float('inf')
+        
+        # Get transitions from the new dataset
+        transitions = None
+        if 'servo_transitions' in chain:
+            transitions = chain['servo_transitions']
+        elif 'cursor_transitions' in chain:
+            transitions = chain['cursor_transitions']
+        elif 'transitions' in chain:
+            transitions = chain['transitions']
+            
+        if transitions:
+            for state_key in transitions.keys():
+                parts = state_key.split('|')
+                if len(parts) >= 4:
+                    try:
+                        positions = [float(parts[i]) for i in range(4)]
+                        # Calculate distance to current position
+                        distance = sum((positions[i] - current_pos[i])**2 for i in range(4))**0.5
+                        if distance < closest_distance:
+                            closest_distance = distance
+                            best_match_key = state_key
+                    except (ValueError, IndexError):
+                        continue
+        
+        if best_match_key:
+            # Update Markov state to this matching state
+            self.current_markov_state = best_match_key
+            
+            # For second-order chains, we need to set previous state too
+            if chain.get('second_order_enabled', False):
+                # Set prev_state to a valid predecessor (or same state)
+                self.prev_markov_state = best_match_key  # Simple approach
+                
+            print(f"🎯 Updated Markov state to match transition position: {best_match_key}")
+            print(f"📏 Position match distance: {closest_distance:.1f}°")
+        else:
+            print("⚠️ Could not find matching state in new dataset")
+
     def restart_markov_with_new_dataset(self):
-        """Restart Markov generation with the newly selected dataset."""
-        if self.generating:
-            print("🔄 Restarting Markov with new dataset...")
-            self.stop_markov_generation()
-            # Small delay to ensure clean stop
-            self.root.after(100, self.start_markov_generation)
+        """Restart Markov generation smoothly with the new dataset."""
+        # Find a good starting state in the new dataset
+        current_positions = [self.finger_positions[0], self.finger_positions[1]]
+        closest_distance = float('inf')
+        best_state = None
+        
+        emotion = self.current_emotion
+        if emotion in self.markov_chains:
+            for state in self.markov_chains[emotion]:
+                # Calculate distance from current position
+                distance = ((state[0] - current_positions[0])**2 + 
+                           (state[1] - current_positions[1])**2)**0.5
+                if distance < closest_distance:
+                    closest_distance = distance
+                    best_state = state
+            
+            if best_state:
+                # Set this as our target for the transition
+                self.transition_target_positions = [best_state[0], best_state[1]]
+                print(f"🎯 Will ease to closest position in new dataset: {best_state[:2]}")
+            else:
+                # Fallback to first state
+                first_state = next(iter(self.markov_chains[emotion]))
+                self.transition_target_positions = [first_state[0], first_state[1]]
+                print(f"🎯 Will ease to first state in new dataset: {first_state[:2]}")
     
     def on_emotion_cycling_toggle(self):
         """Handle emotion cycling toggle."""
@@ -1855,11 +2048,11 @@ class CleanCursorInterface:
         
         # Don't interfere with text input
         if self.text_field_has_focus:
-            return "break"  # Block event propagation
+            return
         
         # Skip spacebar (handled separately)
         if key == 'space':
-            return "break"  # Block event propagation
+            return
             
         # Check if this is a finger control key
         if key in self.key_mappings:
@@ -1876,12 +2069,6 @@ class CleanCursorInterface:
             
             # Apply movement IMMEDIATELY (no delays!)
             self.apply_keyboard_movement(finger_index, direction)
-            
-            return "break"  # CRITICAL: Block event from reaching other widgets
-        
-        # For any other key during recording, block propagation to prevent interference
-        if self.recording:
-            return "break"
     
     def apply_keyboard_movement(self, finger_index, direction):
         """Apply keyboard movement immediately with no delay - respects reverse vertical setting."""
@@ -1908,7 +2095,7 @@ class CleanCursorInterface:
             if not self.recording:  # Only record keyboard movements when not recording datasets
                 keyboard_state = {
                     'timestamp': time.time(),
-                    'servo_positions': self.finger_positions.copy(),  # NEW: Unified servo-based recording
+                    'servo_positions': self.finger_positions.copy(),  # RESTORED: Full data complexity
                     'source': 'keyboard'
                 }
                 self.live_keyboard_states.append(keyboard_state)
@@ -1940,11 +2127,7 @@ class CleanCursorInterface:
         
         # Don't interfere with text input
         if self.text_field_has_focus:
-            return "break"  # Block event propagation
-        
-        # Skip spacebar (handled separately)
-        if key == 'space':
-            return "break"  # Block event propagation
+            return
         
         # Remove from pressed keys
         if key in self.pressed_keys:
@@ -1967,10 +2150,6 @@ class CleanCursorInterface:
             if not finger_still_controlled and self.finger_locks[finger_index]:
                 self.finger_locks[finger_index] = False
                 print(f"🔓 Finger {finger_index+1} released to cursor control (INSTANT)")
-        
-        # Block event propagation during recording to prevent interference
-        if self.recording:
-            return "break"
     
     def release_finger_to_cursor(self, finger_index):
         """Release a finger from keyboard control back to cursor control with smooth transition."""
@@ -2187,7 +2366,6 @@ class CleanCursorInterface:
         # Update cycling behavior (dataset and emotion cycling)
         self.update_cycling_behavior()
         self.update_emotion_transition()
-        self.update_dataset_transition()
         
         # Schedule next update
         self.root.after(16, self.control_loop)  # ~60 FPS
@@ -2416,22 +2594,31 @@ class CleanCursorInterface:
         
         if changed or current_time - getattr(self, 'last_any_send_time', 0) > 1.0:
             try:
-                # MAP SERVO RANGE: Convert from 0-180° to Arduino's actual range (40-130°)
-                # Arduino constrains to 40-130° (90° range), so we need to map our servo_range to that
-                arduino_min = 40
-                arduino_max = 130
-                arduino_center = (arduino_min + arduino_max) / 2  # 85°
-                arduino_range = arduino_max - arduino_min  # 90°
+                # MAP SERVO RANGE: Use Arduino's full 0-180° range (matches updated Arduino code)
+                # Arduino now accepts 0-180° (full range), map based on actual servo_range used
+                arduino_min = 0     # Arduino now supports full range
+                arduino_max = 180   # Arduino now supports full range
+                arduino_center = (arduino_min + arduino_max) / 2  # 90°
+                arduino_range = arduino_max - arduino_min  # 180°
+                
+                # Get the current servo range setting to determine actual range used
+                current_servo_range = self.servo_range.get()
+                default_pos = self.default_position.get()
                 
                 positions = []
                 for i in range(self.num_fingers):
-                    # Convert from our 0-180° system to Arduino's 40-130° system
-                    # Center our position around 90° and map to Arduino center (85°)
-                    offset_from_center = self.finger_positions[i] - 90.0
-                    # Scale to Arduino's available range
-                    arduino_offset = (offset_from_center / 90.0) * (arduino_range / 2.0)
+                    # Calculate offset from default position
+                    offset_from_default = self.finger_positions[i] - default_pos
+                    
+                    # Scale based on actual servo_range setting
+                    # This makes the servo_range slider actually control the movement range
+                    normalized_offset = offset_from_default / current_servo_range
+                    
+                    # Map to Arduino's available range (now full 0-180°)
+                    arduino_offset = normalized_offset * (arduino_range / 2.0)
                     arduino_position = arduino_center + arduino_offset
-                    # Clamp to Arduino's actual limits
+                    
+                    # Clamp to Arduino's actual limits (now 0-180°)
                     arduino_position = max(arduino_min, min(arduino_max, arduino_position))
                     positions.append(int(arduino_position))
                 
@@ -2463,7 +2650,7 @@ class CleanCursorInterface:
                 current_buffer = self.recorded_movements[emotion_name]
                 buffer_length = len(current_buffer)
                 
-                # If buffer is getting large, keep only the most recent data
+                # Standard cleanup for 20s recordings - start at 80% capacity
                 if buffer_length > self.max_recording_points * 0.8:  # Start cleanup at 80% capacity
                     # Keep most recent 60% of data
                     keep_count = int(self.max_recording_points * 0.6)
@@ -2519,7 +2706,7 @@ class CleanCursorInterface:
         # 5. Update UI status
         if hasattr(self, 'record_status'):
             self.record_status.config(text="All data cleared - ready to record!", foreground="green")
-            self.root.after(3000, lambda: self.record_status.config(text="Ready to record 60s segments (Spacebar)", foreground="gray"))
+            self.root.after(3000, lambda: self.record_status.config(text="Ready to record 20s segments (Spacebar)", foreground="gray"))
         
         print("🗑️ ALL DATA CLEARED - Starting completely fresh!")
         print("💡 TIP: Record new movements for each emotion to build fresh, compatible datasets")
@@ -2563,7 +2750,7 @@ class CleanCursorInterface:
         # Show progress bar inside the fixed container (no UI shift!)
         self.progress_frame.pack(expand=True, fill=tk.BOTH)  # Fill the fixed container
         self.progress_var.set(0)
-        self.progress_label.config(text="0:00 / 1:00 (0%)")  # Shows 1 minute = 60 seconds
+        self.progress_label.config(text="0:00 / 0:20 (0%)")  # 20 seconds for stable rich data collection
         
         print(f"🎬 Started TIME-BASED recording for {self.current_emotional_state}")
         print(f"⏰ Sampling at {1/self.record_interval:.0f} Hz (captures easing motions!)")
@@ -2575,7 +2762,7 @@ class CleanCursorInterface:
         # Start progress update timer
         self.update_progress()
         
-        # Auto-stop after 20 seconds to prevent crashes! - FIXED: Matches display
+        # Auto-stop after 20 seconds for stable data collection with full complexity!
         self.root.after(20000, self.auto_stop_recording)
     
     def start_recording_timer(self):
@@ -2596,7 +2783,7 @@ class CleanCursorInterface:
             
         # Calculate elapsed time and progress
         elapsed = time.time() - self.record_start_time
-        total_duration = 60.0  # EXTENDED: 60 seconds for richer datasets!
+        total_duration = 20.0  # 20 seconds for stable rich datasets!
         progress_percent = min(100.0, (elapsed / total_duration) * 100)
         
         # Update progress bar
@@ -2611,7 +2798,7 @@ class CleanCursorInterface:
         time_text = f"{elapsed_minutes}:{elapsed_seconds:02d} / {total_minutes}:{total_seconds:02d} ({progress_percent:.0f}%)"
         self.progress_label.config(text=time_text)
         
-        # CRITICAL FIX: Auto-stop recording at 60 seconds!
+        # STABLE: Auto-stop recording at 20 seconds!
         if elapsed >= 60.0:
             print(f"🔄 Auto-stopping recording at {elapsed:.1f}s")
             self.stop_recording()
@@ -2635,7 +2822,7 @@ class CleanCursorInterface:
         
         # Create position state for Markov chain with ULTRA HIGH RESOLUTION
         # Use 80x80 grid for capturing subtle easing motions (6400 possible states!)
-        grid_size = 80  # Ultra high resolution for easing capture
+        grid_size = 80  # Ultra high resolution for easing capture - RESTORED for data quality
         grid_x = int(self.mouse_x * grid_size)
         grid_y = int(self.mouse_y * grid_size)
         
@@ -2668,6 +2855,7 @@ class CleanCursorInterface:
                 else:
                     movement_phase = "SUDDEN"
         
+        # Create comprehensive position state - FULL DATA COMPLEXITY RESTORED
         position_state = {
             'time': current_time,
             'relative_time': relative_time,
@@ -2680,22 +2868,22 @@ class CleanCursorInterface:
             'velocity_x': velocity_x,  # Capture movement velocity for easing
             'velocity_y': velocity_y,
             'speed': math.sqrt(velocity_x**2 + velocity_y**2),  # Overall speed
-            'movement_phase': movement_phase,  # NEW: Movement classification for hesitation
-            'finger_positions': self.finger_positions.copy(),
-            'finger_locks': self.finger_locks.copy(),      # Capture keyboard locks
-            'pressed_keys': list(self.pressed_keys),       # Capture active keys
-            'keyboard_targets': self.finger_lock_targets.copy(),  # Capture keyboard targets
-            'servo_positions': self.finger_positions.copy()  # Store servo positions with timing
+            'movement_phase': movement_phase,  # Movement classification for hesitation
+            'finger_positions': self.finger_positions.copy(),  # RESTORED: Full data complexity
+            'finger_locks': self.finger_locks.copy(),      # RESTORED: Full data complexity
+            'pressed_keys': list(self.pressed_keys),       # RESTORED: Full data complexity
+            'keyboard_targets': self.finger_lock_targets.copy(),  # RESTORED: Full data complexity
+            'servo_positions': self.finger_positions.copy()  # RESTORED: Full data complexity
         }
         
         self.recorded_positions.append(position_state)
         
-        # Debug first few samples
+        # Debug first few samples - RESTORED full debug output
         if len(self.recorded_positions) <= 5:
             print(f"📍 Sample {len(self.recorded_positions)}: ({self.mouse_x:.3f}, {self.mouse_y:.3f}) -> grid ({grid_x}, {grid_y}) [80x80 grid] speed: {math.sqrt(velocity_x**2 + velocity_y**2):.3f} dt: {dt:.3f}s")
     
     def auto_stop_recording(self):
-        """Auto-stop recording after 45 seconds."""
+        """Auto-stop recording after 20 seconds."""
         if self.recording:
             self.stop_recording()
     
@@ -2717,7 +2905,7 @@ class CleanCursorInterface:
         duration = time.time() - self.record_start_time
         sample_count = len(self.recorded_positions)
         
-        self.record_btn.config(text="🎬 Record Movement (60s)")  # Updated for 60-second recording
+        self.record_btn.config(text="🎬 Record Movement (20s)")
         self.record_status.config(text=f"✅ Recorded {sample_count} samples ({duration:.1f}s)", foreground="green")
         
         print(f"🎬 Stopped recording. Captured {sample_count} position samples in {duration:.1f} seconds")
@@ -3257,6 +3445,20 @@ class CleanCursorInterface:
             if markov_chain:
                 self.markov_chains[emotion] = markov_chain
                 
+                # Reset Markov state variables when loading new chain to prevent generation breaking
+                # Initialize with a random starting state from the new chain
+                servo_transitions = markov_chain.get('servo_transitions', {})
+                if servo_transitions:
+                    import random
+                    starting_state = random.choice(list(servo_transitions.keys()))
+                    self.current_markov_state = starting_state
+                    self.prev_markov_state = None
+                    print(f"🔄 Reset Markov state variables - starting with: {starting_state}")
+                else:
+                    self.current_markov_state = None
+                    self.prev_markov_state = None
+                    print(f"🔄 Reset Markov state variables - no transitions found")
+                
                 # Handle both old and new chain formats for display
                 if 'unique_cursor_states' in markov_chain:  # New enhanced format
                     cursor_states = markov_chain.get('unique_cursor_states', 0)
@@ -3644,7 +3846,7 @@ File: {dataset['filename']}
         
         # UPDATE UI STATE
         self.playback_btn.config(text="⏹️ Stop Playback")
-        self.record_btn.config(text="🎬 Record Movement (60s)")  # Reset record button for 60-second recording
+        self.record_btn.config(text="🎬 Record Movement (20s)")  # Reset record button
         self.generate_btn.config(text="🧠 Generate (Markov)")     # Reset generate button
         self.record_status.config(text="▶️ PLAYING BACK...", foreground="blue")
         
@@ -3654,7 +3856,7 @@ File: {dataset['filename']}
         """Stop playback."""
         self.playing_back = False
         self.playback_btn.config(text="▶️ Play Back")
-        self.record_status.config(text="Ready to record 60s segments (Spacebar)", foreground="gray")  # Updated for 60s
+        self.record_status.config(text="Ready to record 20s segments (Spacebar)", foreground="gray")
         print("⏹️ Playback stopped")
     
     def update_playback(self):
@@ -3804,7 +4006,12 @@ File: {dataset['filename']}
             self.current_markov_state = curr_state_key
             
             # Set initial finger positions from current state
-            if len(curr_state) >= 4:
+            if hasattr(self, 'markov_restart_from_position'):
+                # Use the position we just transitioned to smoothly
+                self.finger_positions = self.markov_restart_from_position.copy()
+                delattr(self, 'markov_restart_from_position')  # Clean up
+                print(f"🎯 Starting from transition end position: {self.finger_positions}")
+            elif len(curr_state) >= 4:
                 self.finger_positions = [float(curr_state[i]) for i in range(4)]
             else:
                 # Fallback for shorter states
@@ -3857,12 +4064,17 @@ File: {dataset['filename']}
             
             # Handle different state types
             if 'servo_transitions' in chain:
-                if len(start_state) >= 4:
+                if hasattr(self, 'markov_restart_from_position'):
+                    # Use the position we just transitioned to smoothly
+                    self.finger_positions = self.markov_restart_from_position.copy()
+                    delattr(self, 'markov_restart_from_position')  # Clean up
+                    print(f"🎯 Starting servo generation from transition end position: {self.finger_positions}")
+                elif len(start_state) >= 4:
                     self.finger_positions = [float(start_state[i]) for i in range(4)]
                 else:
                     self.finger_positions = [float(start_state[0]), float(start_state[1]), 
                                            float(start_state[0]), float(start_state[1])]
-                print(f"🎯 Starting servo generation from positions: {self.finger_positions}")
+                    print(f"🎯 Starting servo generation from positions: {self.finger_positions}")
             else:
                 # Cursor-based fallback
                 grid_size = chain.get('grid_size', 80)
@@ -3905,6 +4117,12 @@ File: {dataset['filename']}
         """Take one step in Markov generation with second-order support."""
         if not self.generating or self.current_emotional_state not in self.markov_chains:
             return
+        
+        # Handle dataset transitions (smooth easing)
+        if hasattr(self, 'dataset_transitioning') and self.dataset_transitioning:
+            print(f"🔄 Transition active - calling update_dataset_transition")
+            self.update_dataset_transition()
+            return  # Skip normal generation during transition
         
         try:
             chain = self.markov_chains[self.current_emotional_state]
@@ -3976,33 +4194,16 @@ File: {dataset['filename']}
                         self.prev_markov_state = self.current_markov_state
                         self.current_markov_state = next_state_key
                         
-                        # Parse and apply the new state (already parsed above for timing calculation)
+                        # Parse and apply the new state - TRUST THE RECORDED DATA COMPLETELY
                         if len(next_state) >= 4:
-                            # Enhanced easing based on timing and context
-                            max_change = max([abs(float(next_state[i]) - self.finger_positions[i]) for i in range(4)])
-                            
-                            # Adaptive easing factor based on movement type and timing
-                            if transition_context.get('has_stillness', False) and max_change > 20:
-                                # Coming from stillness - slower easing for weight/hesitation feel
-                                easing_factor = 0.08
-                            elif transition_context.get('has_sudden', False):
-                                # Sudden movement - faster easing for responsiveness  
-                                easing_factor = 0.4
-                            elif max_change > 30.0 or self.generation_speed < 0.05:
-                                # Large move or fast timing - slower easing for smoothness
-                                easing_factor = 0.12
-                            elif max_change < 5.0:
-                                # Small adjustment - normal easing
-                                easing_factor = 0.25
-                            else:
-                                # Normal movement
-                                easing_factor = 0.2
-                            
-                            # Apply easing interpolation
+                            # Apply recorded positions directly - the 40Hz recording already contains 
+                            # all the natural human timing, smoothness, and twitchiness exactly as performed
                             for i in range(4):
                                 target_pos = max(0.0, min(180.0, float(next_state[i])))
-                                self.finger_positions[i] = (self.finger_positions[i] * (1 - easing_factor) + 
-                                                          target_pos * easing_factor)
+                                self.finger_positions[i] = target_pos  # Pure data application - no artificial smoothing
+                            
+                            movement_phase = next_state[4] if len(next_state) > 4 else 'MEDIUM'
+                            print(f"🎯 Raw data: {movement_phase} movement (dt={self.generation_speed:.3f}s) - preserving original characteristics")
                         
                         print(f"🔗 2nd-order: {lookup_key} → {next_state_key} (dt={self.generation_speed:.3f}s)")
                         self.send_to_hand_controller()
@@ -4188,22 +4389,33 @@ File: {dataset['filename']}
             
             # Apply to servo positions (simple, direct like golden master sets cursor)
             if len(next_state) >= 4:  # Should be (servo1, servo2, servo3, servo4)
-                # ADAPTIVE EASING: Use gentler easing for diversity jumps
+                # ADAPTIVE EASING: Use data-driven easing from recorded movement characteristics
                 if hasattr(self, '_is_diversity_jump') and self._is_diversity_jump:
                     # Much gentler easing for diversity jumps to avoid jarring movement
                     easing_factor = 0.08  # Very gentle 8% easing for smooth diversity transitions
                     print(f"🌊 Applying gentle diversity easing: {easing_factor}")
                 else:
-                    # Normal easing for regular transitions
-                    easing_factor = self.generation_easing_factor  # 0.3 for normal smooth movement
+                    # Use the intelligent easing factor calculated from movement data
+                    if hasattr(self, '_intelligent_easing_factor'):
+                        easing_factor = self._intelligent_easing_factor
+                    else:
+                        # Fallback to normal easing
+                        easing_factor = self.generation_easing_factor  # 0.3 for normal smooth movement
                 
                 for i in range(self.num_fingers):
                     if i < len(next_state):
                         target_pos = float(next_state[i])
                         # Clamp target position to valid servo range
                         target_pos = max(0.0, min(180.0, target_pos))
-                        # Simple interpolation (like golden master cursor movement)
-                        self.finger_positions[i] = self.finger_positions[i] * (1 - easing_factor) + target_pos * easing_factor
+                        # Only update finger positions if not transitioning between datasets
+                        if not self.transitioning_to_dataset:
+                            # Simple interpolation (like golden master cursor movement)
+                            self.finger_positions[i] = self.finger_positions[i] * (1 - easing_factor) + target_pos * easing_factor
+                
+                # Debug output for sudden/twitchy movements to verify preservation
+                if hasattr(self, '_intelligent_easing_factor') and self._intelligent_easing_factor > 0.9:
+                    movement_phase = hasattr(self, '_current_movement_phase') and self._current_movement_phase or 'UNKNOWN'
+                    print(f"🔥 TWITCHY: easing={easing_factor:.2f}, phase={movement_phase}, speed={self.generation_speed:.3f}s")
                 
                 # Send to servos (direct, no complex logic)
                 self.send_to_hand_controller()
@@ -4213,11 +4425,16 @@ File: {dataset['filename']}
                 if hasattr(self, '_is_diversity_jump') and self._is_diversity_jump:
                     easing_factor = 0.08  # Gentle easing for diversity jumps
                 else:
-                    easing_factor = self.generation_easing_factor  # Normal easing
+                    # Use the intelligent easing factor calculated from movement data
+                    if hasattr(self, '_intelligent_easing_factor'):
+                        easing_factor = self._intelligent_easing_factor
+                    else:
+                        easing_factor = self.generation_easing_factor  # Normal easing
                 
                 target_pos_0 = max(0.0, min(180.0, float(next_state[0])))
                 target_pos_1 = max(0.0, min(180.0, float(next_state[1])))
                 
+                # Apply easing to finger positions
                 self.finger_positions[0] = self.finger_positions[0] * (1 - easing_factor) + target_pos_0 * easing_factor
                 self.finger_positions[1] = self.finger_positions[1] * (1 - easing_factor) + target_pos_1 * easing_factor
                 self.finger_positions[2] = self.finger_positions[2] * (1 - easing_factor) + target_pos_0 * easing_factor
@@ -4231,6 +4448,10 @@ File: {dataset['filename']}
             # Clean up diversity jump flag for next step
             if hasattr(self, '_is_diversity_jump'):
                 self._is_diversity_jump = False
+            
+            # Handle simple dataset transition
+            if hasattr(self, 'transitioning_to_dataset') and self.transitioning_to_dataset:
+                self.update_simple_transition()
                 
         except Exception as e:
             print(f"❌ Error in Markov generation step: {e}")
@@ -4249,6 +4470,39 @@ File: {dataset['filename']}
                 print(f"❌ Recovery also failed: {recovery_error}")
                 # Continue anyway - don't stop generation
     
+    def update_simple_transition(self):
+        """Update simple smooth transition to new dataset."""
+        if not hasattr(self, 'transitioning_to_dataset') or not self.transitioning_to_dataset:
+            return
+            
+        current_time = time.time()
+        elapsed = current_time - self.transition_start_time
+        progress = min(1.0, elapsed / self.transition_duration)
+        
+        # Smooth easing curve (ease-in-out)
+        eased_progress = 0.5 * (1 - math.cos(progress * math.pi))
+        
+        # Interpolate to target positions
+        if hasattr(self, 'transition_target_positions'):
+            for i in range(min(len(self.finger_positions), len(self.transition_target_positions))):
+                start_pos = self.transition_start_positions[i]
+                target_pos = self.transition_target_positions[i]
+                self.finger_positions[i] = start_pos + (target_pos - start_pos) * eased_progress
+            
+            # Send updated positions to servos
+            self.send_to_hand_controller()
+            
+            # Check if transition is complete
+            if progress >= 1.0:
+                self.transitioning_to_dataset = False
+                print(f"✅ Dataset transition complete - now using new Markov chain")
+                
+                # Clear transition data
+                if hasattr(self, 'transition_start_positions'):
+                    delattr(self, 'transition_start_positions')
+                if hasattr(self, 'transition_target_positions'):
+                    delattr(self, 'transition_target_positions')
+
     def update_markov_generation(self):
         """Update method called from control loop during generation."""
         # The actual generation happens in step_markov_generation() via timer
