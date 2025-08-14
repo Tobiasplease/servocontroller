@@ -341,8 +341,10 @@ class CleanCursorInterface:
         self.live_keyboard_limit = 200  # Keep only recent movements for live generation
         
         # === ENHANCED DATASET CYCLING SYSTEM ===
-        self.dataset_cycling_enabled = tk.BooleanVar(value=False)
-        self.dataset_cycle_interval = 20.0  # 20 seconds between dataset switches
+        self.dataset_cycling_enabled = tk.BooleanVar(value=True)  # Auto-enabled for machine.py integration
+        self.dataset_cycle_interval_min = 10.0  # Minimum 10 seconds between switches
+        self.dataset_cycle_interval_max = 60.0  # Maximum 60 seconds between switches
+        self.dataset_cycle_interval = self._get_random_cycle_interval()  # Start with random interval
         self.last_dataset_switch_time = 0
         self.current_dataset_index = 0  # Index in available datasets for current emotion
         
@@ -365,16 +367,25 @@ class CleanCursorInterface:
         self.emotion_transition_source = None
         self.emotion_transition_target = None
         
+        # === MOOD MONITORING SYSTEM ===
+        self.mood_monitoring_enabled = True  # Auto-read mood from machine.py
+        self.mood_file_path = "hand_controller_state.json"
+        self.last_mood_check_time = 0
+        self.mood_check_interval = 2.0  # Check mood every 2 seconds
+        self.last_mood_state = None  # Track last mood to avoid unnecessary switches
+        print("🎭 Mood monitoring enabled - will auto-switch emotional states based on machine.py mood")
+        
         self.setup_ui()
         self.start_control_loop()
         
-        # DISABLED: Don't load old movements automatically to prevent memory bloat
-        # self.load_saved_movements()
-        print("⚠️ Automatic loading of saved movements DISABLED to prevent memory bloat")
+        # STARTUP DATASET LOADING: Load all datasets automatically for autonomous operation
+        print("🔄 Loading datasets for autonomous operation...")
+        self.show_startup_loading()
+        self.load_all_datasets_on_startup()
         
-        # DISABLED: Don't refresh datasets automatically to prevent errors during startup
-        # self.refresh_datasets()
-        print("⚠️ Automatic dataset refresh DISABLED - use 'Refresh' button manually if needed")
+        # AUTO-CONNECT TO ARDUINO: Automatically connect to hand controller
+        print("🔌 Auto-connecting to Arduino...")
+        self.auto_connect_arduino()
         
         # MEMORY MANAGEMENT: Aggressively clean up any existing data on startup
         print("🧹 Performing aggressive startup memory cleanup...")
@@ -398,8 +409,29 @@ class CleanCursorInterface:
         print(f"🎯 Condensed control area: 25%-75% of canvas width for precise movement")
         print("🎯 Rich 20s recordings with full data complexity for quality datasets!")
         
-        # Initialize the cleaner dataset display
+        # Perform startup dataset loading
+        # self.perform_startup_loading()  # Method doesn't exist - commented out
+        
+        # Initialize the cleaner dataset display (will be updated after startup loading)
+        # Don't update immediately - wait for startup loading to complete
+        if hasattr(self, '_startup_loading_complete') and self._startup_loading_complete:
+            self.update_emotion_dataset_display()
+        
+        # Schedule final dataset display update after UI is fully ready
+        self.root.after(100, self._finalize_startup_display)
+    
+    def _finalize_startup_display(self):
+        """Finalize the dataset display after startup loading is complete."""
+        print("🔄 Finalizing dataset display after startup...")
+        # Force update the current emotion display
         self.update_emotion_dataset_display()
+        # Also update the dropdown to show proper data
+        self.refresh_emotion_datasets()
+        # Update UI status for current emotion
+        if hasattr(self, 'update_markov_status_for_emotion'):
+            self.update_markov_status_for_emotion(self.current_emotional_state)
+        print("✅ Startup dataset display finalized")
+        self._startup_loading_complete = True
     
     def _on_mousewheel(self, event):
         """Handle mouse wheel scrolling in the interface."""
@@ -485,35 +517,35 @@ class CleanCursorInterface:
         self.refresh_serial_ports()
         
         # === EMOTIONAL STATE CONTROL ===
-        # Create beautiful custom frame with muted pastel purple styling
-        emotion_outer = tk.Frame(self.scrollable_frame, bg='#B8A9D9', relief='raised', bd=2)  # Muted purple border
+        # Create transparent frame for floating effect
+        emotion_outer = tk.Frame(self.scrollable_frame, relief='flat', bd=0)  # Fully transparent background for floating look
         emotion_outer.pack(fill=tk.X, padx=10, pady=8)
         
-        # Header with cute styling  
-        emotion_header = tk.Frame(emotion_outer, bg='#F0EBFF', height=30)  # Very soft lavender header
+        # Header with transparent styling  
+        emotion_header = tk.Frame(emotion_outer, height=30)  # Fully transparent header
         emotion_header.pack(fill=tk.X, padx=2, pady=(2,0))
         emotion_header.pack_propagate(False)
         
         emotion_title = tk.Label(emotion_header, text="😊 Emotional State Control",
-                                bg='#F0EBFF', fg='#6B46C1',
+                                fg='#6B46C1',
                                 font=self.fonts['button'])
         emotion_title.pack(pady=5)
         
-        # Content area with soft background
-        emotion_frame = tk.Frame(emotion_outer, bg='#FDFCFF', relief='flat')  # Ultra soft purple-white content  
+        # Content area with transparent background
+        emotion_frame = tk.Frame(emotion_outer, relief='flat')  # Fully transparent content area
         emotion_frame.pack(fill=tk.X, padx=2, pady=(0,2))
         
-        # Create inner frame for better layout
-        emotion_inner = ttk.Frame(emotion_frame)
+        # Create inner frame for better layout - using tk.Frame for transparency
+        emotion_inner = tk.Frame(emotion_frame)
         emotion_inner.pack(fill=tk.X, padx=10, pady=8)
         
         # Current state display with custom font
-        self.current_state_label = ttk.Label(emotion_inner, text=f"Current: {self.current_emotional_state}", 
+        self.current_state_label = tk.Label(emotion_inner, text=f"Current: {self.current_emotional_state}", 
                                            font=self.fonts['subtitle'])
         self.current_state_label.pack(pady=(0, 10))  # Bottom padding
         
         # Emotion buttons - cute pastel styling with emojis!
-        emotion_buttons_frame = ttk.Frame(emotion_inner)
+        emotion_buttons_frame = tk.Frame(emotion_inner)
         emotion_buttons_frame.pack(pady=(0, 10))
         
         # Emotion button data with cute emojis
@@ -536,12 +568,12 @@ class CleanCursorInterface:
             btn.pack(side=tk.LEFT, padx=6)
         
         # Movement recording/playback control - BETTER FORMATTED!
-        record_frame = ttk.Frame(emotion_inner)
+        record_frame = tk.Frame(emotion_inner)
         record_frame.pack(pady=(0, 10))
         
         # === SIDE-BY-SIDE LAYOUT: RECORD CONTROLS + CANVAS ===
         # Left side - Record buttons
-        record_buttons_frame = ttk.Frame(record_frame)
+        record_buttons_frame = tk.Frame(record_frame)
         record_buttons_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
         
         # Record button - EXTENDED RECORDINGS FOR RICHER DATA!
@@ -610,7 +642,7 @@ class CleanCursorInterface:
         self.canvas.bind('<Button-1>', self.on_mouse_click)
         
         # Status frame for better organization
-        status_frame = ttk.Frame(emotion_inner)
+        status_frame = tk.Frame(emotion_inner)
         status_frame.pack(fill=tk.X, pady=(0, 5))
         
         # Configure grid columns to prevent shifting
@@ -628,8 +660,8 @@ class CleanCursorInterface:
         self.markov_status.grid(row=0, column=1, sticky="e")
         
         # === DATASET MANAGEMENT - CLEANER INTERFACE! ===
-        # Create beautiful custom frame with muted pastel purple styling  
-        dataset_outer = tk.Frame(emotion_inner, bg='#B8A9D9', relief='raised', bd=2)  # Muted purple border
+        # Create beautiful custom frame with transparent styling  
+        dataset_outer = tk.Frame(emotion_inner, relief='flat', bd=0)  # Transparent background
         dataset_outer.pack(fill=tk.X, padx=20, pady=(10, 5))
         
         # Header with cute styling  
@@ -753,7 +785,7 @@ class CleanCursorInterface:
         dataset_cycle_frame.pack(fill=tk.X, pady=(0, 5))
         
         self.dataset_cycle_cb = ttk.Checkbutton(dataset_cycle_frame, 
-                                               text="🎲 Auto-cycle datasets (20sec intervals)", 
+                                               text="🎲 Auto-cycle datasets (10s-1min intervals)", 
                                                variable=self.dataset_cycling_enabled,
                                                command=self.on_dataset_cycling_toggle)
         self.dataset_cycle_cb.pack(side=tk.LEFT)
@@ -1189,11 +1221,13 @@ class CleanCursorInterface:
         """Update dataset and emotion cycling behavior."""
         current_time = time.time()
         
-        # Handle dataset cycling (every 1 minute)
+        # Handle dataset cycling (random intervals between 10s-1min)
         if (self.dataset_cycling_enabled.get() and 
             current_time - self.last_dataset_switch_time >= self.dataset_cycle_interval):
             self.cycle_to_next_dataset()
             self.last_dataset_switch_time = current_time
+            # Set new random interval for next cycle
+            self.dataset_cycle_interval = self._get_random_cycle_interval()
         
         # Handle emotion cycling (every 3 minutes) 
         if (self.emotion_cycling_enabled.get() and 
@@ -1245,16 +1279,21 @@ class CleanCursorInterface:
             
             try:
                 current_index = display_names.index(current_dataset)
-                next_index = (current_index + 1) % len(display_names)
+                # RANDOM SELECTION instead of sequential cycling
+                available_indices = [i for i in range(len(display_names)) if i != current_index]
+                if available_indices:
+                    next_index = random.choice(available_indices)
+                else:
+                    next_index = current_index  # Only one dataset available
             except ValueError:
-                # Current dataset not in list, start from 0
-                next_index = 0
-                print(f"⚠️ Current dataset not found in list, starting from first dataset")
+                # Current dataset not in list, pick random starting point
+                next_index = random.randint(0, len(display_names) - 1)
+                print(f"⚠️ Current dataset not found in list, randomly selecting dataset")
             
             next_dataset = display_names[next_index]
             next_dataset_info = available_datasets[next_index]
             
-            print(f"🎲 Dataset cycling: {emotion} → {next_dataset}")
+            print(f"🎲 Random dataset switch: {emotion} → {next_dataset}")
             print(f"📁 Using file: {next_dataset_info['filename']}")
             
             # Start smooth transition to new dataset
@@ -1727,6 +1766,10 @@ class CleanCursorInterface:
                 foreground="green"
             )
     
+    def _get_random_cycle_interval(self):
+        """Generate a random interval between 10-60 seconds for more organic behavior"""
+        return random.randint(int(self.dataset_cycle_interval_min), int(self.dataset_cycle_interval_max))
+    
     def switch_emotional_state(self, emotion_name):
         """Switch to a different emotional state and update movement parameters."""
         if emotion_name not in self.emotional_states:
@@ -1743,6 +1786,8 @@ class CleanCursorInterface:
         
         print(f"🎭 Switched to {emotion_name} emotional state")
         print(f"📊 Parameters: sensitivity={params['cursor_sensitivity']:.1f}")
+        # Update UI status for current emotion
+        self.update_markov_status_for_emotion(emotion_name)
         
         # Update CLEARER dataset display for new emotion
         self.update_emotion_dataset_display()
@@ -1751,6 +1796,67 @@ class CleanCursorInterface:
         if len(self.available_datasets) == 0:
             print("🔄 No datasets loaded, refreshing...")
             self.refresh_datasets()
+
+        # Auto-start Markov generation for the new emotional state
+        # Stop any current generation first
+        if self.generating:
+            self.stop_markov_generation()
+        
+        # Start generation for the new emotional state if possible
+        print(f"🤖 Auto-starting Markov generation for {emotion_name}")
+        
+        # Ensure startup is complete before proceeding
+        if not hasattr(self, '_startup_loading_complete') or not self._startup_loading_complete:
+            print(f"⏳ Completing startup initialization for {emotion_name}...")
+            self._finalize_startup_display()
+            self._startup_loading_complete = True
+        
+        # Force refresh of datasets and UI for current emotion  
+        self.refresh_emotion_datasets()
+        self.update_markov_status_for_emotion(emotion_name)
+        
+        # First build Markov chain if not available
+        if self.current_emotional_state not in self.markov_chains:
+            print(f"🔗 Building Markov chain for {emotion_name}...")
+            self.build_markov_chain()
+            
+        # Check if we now have a Markov chain to use
+        if self.current_emotional_state in self.markov_chains:
+            print(f"✅ Markov chain available for {emotion_name} - starting generation")
+            # Simulate clicking the Generate button to ensure proper UI state
+            self.generate_btn.invoke()  # This properly triggers the button
+        else:
+            print(f"⚠️ Could not build Markov chain for {emotion_name} - no recorded movements available")
+    
+    def check_mood_file(self):
+        """Check mood file from machine.py and auto-switch emotional state if needed."""
+        if not self.mood_monitoring_enabled:
+            return
+            
+        current_time = time.time()
+        if current_time - self.last_mood_check_time < self.mood_check_interval:
+            return
+            
+        self.last_mood_check_time = current_time
+        
+        try:
+            if os.path.exists(self.mood_file_path):
+                with open(self.mood_file_path, 'r') as f:
+                    mood_data = json.load(f)
+                
+                emotion_state = mood_data.get('emotion_state', '')
+                mood_value = mood_data.get('mood_value', 0.0)
+                timestamp = mood_data.get('timestamp', 0)
+                
+                # Only switch if the state has changed
+                if emotion_state != self.last_mood_state and emotion_state in self.emotional_states:
+                    print(f"🎭 Mood update: {emotion_state} (mood: {mood_value:.2f})")
+                    self.switch_emotional_state(emotion_state)
+                    self.last_mood_state = emotion_state
+                    
+        except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
+            # Silently handle file reading errors - machine.py might not be running
+            pass
     
     def update_emotion_dataset_display(self):
         """Update the emotion-specific dataset display with clear information."""
@@ -1801,9 +1907,30 @@ class CleanCursorInterface:
         if emotion_datasets:
             for dataset_info in emotion_datasets:
                 filename = dataset_info.get('filename', 'Unknown')
-                points = dataset_info.get('points', 0)
-                name = dataset_info.get('name', filename.replace('.json', ''))
-                display_name = f"{name} ({points} points)"
+                sample_count = dataset_info.get('sample_count', 0)  # Use sample_count instead of points
+                duration = dataset_info.get('duration', 0)
+                custom_name = dataset_info.get('custom_name', '')
+                timestamp = dataset_info.get('timestamp', 'unknown')
+                
+                # Format timestamp to be more readable
+                try:
+                    if len(timestamp) >= 8:
+                        date_part = timestamp[:8]
+                        time_part = timestamp[9:15] if len(timestamp) > 9 else "000000"
+                        formatted_date = f"{date_part[4:6]}/{date_part[6:8]}"
+                        formatted_time = f"{time_part[:2]}:{time_part[2:4]}"
+                        readable_time = f"{formatted_date} {formatted_time}"
+                    else:
+                        readable_time = timestamp
+                except:
+                    readable_time = timestamp
+                
+                # Create display name that matches the format expected by other methods
+                if custom_name:
+                    display_name = f"{custom_name} ({readable_time}) - {sample_count:,} samples, {duration:.1f}s"
+                else:
+                    display_name = f"Recording {readable_time} - {sample_count:,} samples, {duration:.1f}s"
+                    
                 dataset_options.append(display_name)
         
         if not dataset_options:
@@ -1811,16 +1938,16 @@ class CleanCursorInterface:
         
         self.dataset_dropdown['values'] = dataset_options
         
-        # Set current selection
-        active_dataset = self.active_datasets.get(emotion, "")
-        if active_dataset and dataset_options:
-            # Try to find and select the active dataset
-            for option in dataset_options:
-                if active_dataset in option:
-                    self.dataset_var.set(option)
-                    break
-            else:
-                self.dataset_var.set(dataset_options[0])
+        # Set current selection - auto-select first available dataset
+        if dataset_options and not dataset_options[0].startswith("No datasets"):
+            # Auto-select the first (most recent) dataset
+            self.dataset_var.set(dataset_options[0])
+            # Also set it as the active dataset for this emotion
+            if emotion_datasets:
+                self.active_datasets[emotion] = emotion_datasets[0]['filename']
+                # Load the Markov chain immediately
+                if self.load_markov_chain_from_dataset(emotion_datasets[0], emotion):
+                    print(f"🔗 Auto-loaded Markov chain for {emotion} from {emotion_datasets[0]['display_name']}")
         elif dataset_options:
             self.dataset_var.set(dataset_options[0])
     
@@ -1924,6 +2051,65 @@ class CleanCursorInterface:
             self.status_label.config(text="❌ Disconnected")
             self.connect_btn.config(text="Connect to Hand Controller")
             print("🔌 Disconnected from hand controller")
+    
+    def auto_connect_arduino(self):
+        """Automatically detect and connect to Arduino."""
+        if not HAND_CONTROLLER_AVAILABLE:
+            print("⚠️ Hand controller not available - running in simulation mode")
+            return
+            
+        if self.connected:
+            print("✅ Already connected to Arduino")
+            return
+            
+        print("🔍 Scanning for Arduino ports...")
+        
+        # Try to find Arduino automatically
+        arduino_ports = []
+        try:
+            ports = list_ports.comports()
+            for port in ports:
+                # Look for common Arduino identifiers
+                if any(keyword in (port.description or "").lower() for keyword in 
+                       ['arduino', 'ch340', 'cp210', 'ftdi', 'serial']):
+                    arduino_ports.append(port.device)
+                    print(f"🎯 Found potential Arduino: {port.device} - {port.description}")
+        except Exception as e:
+            print(f"⚠️ Error scanning ports: {e}")
+            
+        # Try connecting to found ports
+        for port in arduino_ports:
+            try:
+                print(f"🔌 Trying to connect to {port}...")
+                
+                self.hand_controller = HandExpressionController(
+                    port=port,
+                    baudrate=9600,
+                    clean_output=True
+                )
+                
+                if self.hand_controller.serial_connection:
+                    self.hand_controller.enable_manual_override()
+                    self.connected = True
+                    self.status_label.config(text=f"✅ Auto-connected ({port})")
+                    self.connect_btn.config(text="Disconnect")
+                    print(f"✅ Auto-connected to Arduino on {port}")
+                    return
+                else:
+                    if self.hand_controller:
+                        if hasattr(self.hand_controller, 'cleanup'):
+                            self.hand_controller.cleanup()
+                        self.hand_controller = None
+                        
+            except Exception as e:
+                print(f"❌ Failed to connect to {port}: {e}")
+                if self.hand_controller:
+                    if hasattr(self.hand_controller, 'cleanup'):
+                        self.hand_controller.cleanup()
+                    self.hand_controller = None
+                    
+        print("❌ No Arduino found - running in simulation mode")
+        self.status_label.config(text="❌ No Arduino detected")
     
     def on_canvas_configure(self, event):
         """Prevent canvas from being resized and maintain fixed dimensions."""
@@ -2367,6 +2553,17 @@ class CleanCursorInterface:
         self.update_cycling_behavior()
         self.update_emotion_transition()
         
+        # Check for mood updates from machine.py
+        self.check_mood_file()
+        
+        # Periodic timer cleanup (every 5 minutes to prevent accumulation)
+        if hasattr(self, 'last_timer_cleanup'):
+            if time.time() - self.last_timer_cleanup > 300:  # 5 minutes
+                self.cleanup_orphaned_timers()
+                self.last_timer_cleanup = time.time()
+        else:
+            self.last_timer_cleanup = time.time()
+        
         # Schedule next update
         self.root.after(16, self.control_loop)  # ~60 FPS
     
@@ -2453,6 +2650,13 @@ class CleanCursorInterface:
         if current_state != self.last_render_state:
             self._full_canvas_redraw(canvas_width, canvas_height, cursor_x, cursor_y)
             self.last_render_state = current_state.copy()
+            
+            # MEMORY CLEANUP: Limit history to prevent memory leaks
+            if len(self.canvas_objects) > 100:  # Arbitrary limit
+                oldest_keys = list(self.canvas_objects.keys())[:50]
+                for key in oldest_keys:
+                    if key in self.canvas_objects:
+                        del self.canvas_objects[key]
         else:
             # Just update cursor position for smooth movement
             if 'cursor' in self.canvas_objects:
@@ -2750,7 +2954,8 @@ class CleanCursorInterface:
         # Show progress bar inside the fixed container (no UI shift!)
         self.progress_frame.pack(expand=True, fill=tk.BOTH)  # Fill the fixed container
         self.progress_var.set(0)
-        self.progress_label.config(text="0:00 / 0:20 (0%)")  # 20 seconds for stable rich data collection
+        recording_duration = self.max_recording_points / 40  # 40Hz sampling rate
+        self.progress_label.config(text=f"0:00 / {int(recording_duration//60):01d}:{int(recording_duration%60):02d} (0%)")  # Dynamic duration display
         
         print(f"🎬 Started TIME-BASED recording for {self.current_emotional_state}")
         print(f"⏰ Sampling at {1/self.record_interval:.0f} Hz (captures easing motions!)")
@@ -3367,19 +3572,35 @@ class CleanCursorInterface:
             
             self.dataset_dropdown['values'] = display_options
             
-            # Auto-select the most recent dataset if none selected
-            if not self.dataset_var.get() and display_options:
+        # Auto-select dataset - either pre-loaded during startup or most recent
+        active_filename = self.active_datasets.get(emotion, '')
+        if active_filename and display_options:
+            # Find the display option that corresponds to the active dataset
+            for i, dataset in enumerate(datasets):
+                if dataset['filename'] == active_filename:
+                    self.dataset_var.set(display_options[i])
+                    break
+            else:
+                # Active dataset not found, select most recent
                 self.dataset_var.set(display_options[0])
                 self.active_datasets[emotion] = datasets[0]['filename']
-                
-        # Always show which emotion we're currently working with
+        elif not self.dataset_var.get() and display_options:
+            # No active dataset, select most recent
+            self.dataset_var.set(display_options[0])
+            self.active_datasets[emotion] = datasets[0]['filename']        # Always show which emotion we're currently working with
         emotion_display = emotion.replace('_', ' ').title()
         if hasattr(self, 'dataset_status_label'):
             if datasets:
                 selected_dataset = self.dataset_var.get()
+                active_filename = self.active_datasets.get(emotion, '')
+                
                 if selected_dataset:
+                    # Check if this dataset has a pre-loaded Markov chain
+                    has_preloaded_chain = emotion in self.markov_chains
+                    chain_status = " [Chain Ready]" if has_preloaded_chain else ""
+                    
                     self.dataset_status_label.config(
-                        text=f"✅ Using {emotion_display} dataset: {selected_dataset.split(' - ')[0]}", 
+                        text=f"✅ {emotion_display}: {selected_dataset.split(' - ')[0]}{chain_status}", 
                         foreground="darkgreen"
                     )
                 else:
@@ -3484,6 +3705,29 @@ class CleanCursorInterface:
             print(f"❌ Error loading Markov chain from dataset: {e}")
             return False
     
+
+    def update_markov_status_for_emotion(self, emotion):
+        """Update the UI markov_status to reflect available chains for an emotion."""
+        if emotion in self.markov_chains:
+            chain = self.markov_chains[emotion]
+            if isinstance(chain, dict):
+                unique_states = chain.get('unique_states', 0)
+                if chain.get('second_order_enabled', False):
+                    second_order_keys = chain.get('unique_second_order_keys', 0)
+                    self.markov_status.config(text=f"{unique_states} states, {second_order_keys} 2nd-order keys", foreground="green")
+                else:
+                    avg_transitions = 0
+                    if 'servo_transitions' in chain:
+                        transitions = chain['servo_transitions']
+                        if transitions:
+                            avg_transitions = sum(len(t) for t in transitions.values()) / len(transitions)
+                    self.markov_status.config(text=f"{unique_states} states, {avg_transitions:.1f} avg transitions", foreground="green")
+                print(f"🎯 UI status updated for {emotion}: chain available")
+            else:
+                self.markov_status.config(text="Chain format unknown", foreground="orange")
+        else:
+            self.markov_status.config(text="No chains built", foreground="gray")
+
     def delete_dataset(self):
         """Delete the currently selected dataset."""
         if not self.dataset_var.get():
@@ -4109,9 +4353,15 @@ File: {dataset['filename']}
                 print(f"❌ Error in generation step: {e}")
                 print("🔄 Continuing generation despite error...")
             
-            # ALWAYS schedule next step (even if current step failed)
-            interval_ms = int(self.generation_speed * 1000)
-            self.generation_timer = self.root.after(interval_ms, self.start_generation_timer)
+            # Cancel any existing timer before scheduling new one
+            if self.generation_timer:
+                self.root.after_cancel(self.generation_timer)
+                self.generation_timer = None
+            
+            # Schedule next step (only if still generating)
+            if self.generating:
+                interval_ms = int(self.generation_speed * 1000)
+                self.generation_timer = self.root.after(interval_ms, self.start_generation_timer)
     
     def step_markov_generation(self):
         """Take one step in Markov generation with second-order support."""
@@ -4203,9 +4453,9 @@ File: {dataset['filename']}
                                 self.finger_positions[i] = target_pos  # Pure data application - no artificial smoothing
                             
                             movement_phase = next_state[4] if len(next_state) > 4 else 'MEDIUM'
-                            print(f"🎯 Raw data: {movement_phase} movement (dt={self.generation_speed:.3f}s) - preserving original characteristics")
+                            # Silenced raw data output
                         
-                        print(f"🔗 2nd-order: {lookup_key} → {next_state_key} (dt={self.generation_speed:.3f}s)")
+                        # Silenced 2nd-order output
                         self.send_to_hand_controller()
                         return
                     else:
@@ -4602,6 +4852,251 @@ File: {dataset['filename']}
         else:
             print("📁 No saved recordings found")
             self.markov_status.config(text="No saved chains", foreground="gray")
+    
+    def cleanup_all_timers(self):
+        """Clean up all active timers to prevent UI freezing."""
+        timers_to_cancel = []
+        
+        # Collect all timer references
+        if hasattr(self, 'recording_timer') and self.recording_timer:
+            timers_to_cancel.append(('recording_timer', self.recording_timer))
+            
+        if hasattr(self, 'generation_timer') and self.generation_timer:
+            timers_to_cancel.append(('generation_timer', self.generation_timer))
+            
+        # Cancel all timers
+        for timer_name, timer_id in timers_to_cancel:
+            try:
+                self.root.after_cancel(timer_id)
+                setattr(self, timer_name, None)
+                print(f"✅ Cancelled {timer_name}")
+            except Exception as e:
+                print(f"⚠️ Error cancelling {timer_name}: {e}")
+        
+        print(f"🧹 Timer cleanup complete - cancelled {len(timers_to_cancel)} timers")
+    
+    def cleanup_orphaned_timers(self):
+        """Periodic cleanup of orphaned timers to prevent UI freezing."""
+        # Reset timer references if they're not actively needed
+        if not self.recording and self.recording_timer:
+            try:
+                self.root.after_cancel(self.recording_timer)
+                self.recording_timer = None
+                print("🧹 Cleaned up orphaned recording timer")
+            except:
+                pass
+                
+        if not self.generating and self.generation_timer:
+            try:
+                self.root.after_cancel(self.generation_timer)
+                self.generation_timer = None
+                print("🧹 Cleaned up orphaned generation timer")
+            except:
+                pass
+
+
+    def show_startup_loading(self):
+        """Show a loading progress bar during startup dataset loading."""
+        # Create a simple loading window
+        self.loading_window = tk.Toplevel(self.root)
+        self.loading_window.title("Loading Datasets")
+        self.loading_window.geometry("400x150")
+        self.loading_window.configure(bg=self.colors['bg_main'])
+        self.loading_window.resizable(False, False)
+        
+        # Center the loading window
+        self.loading_window.transient(self.root)
+        self.loading_window.grab_set()
+        
+        # Loading content
+        loading_frame = tk.Frame(self.loading_window, bg=self.colors['bg_main'])
+        loading_frame.pack(expand=True, fill=tk.BOTH, padx=20, pady=20)
+        
+        # Title
+        title_label = tk.Label(loading_frame, text="🚀 Initializing Hand Control System", 
+                              bg=self.colors['bg_main'], fg=self.colors['text_main'],
+                              font=self.fonts['subtitle'])
+        title_label.pack(pady=(0, 10))
+        
+        # Progress bar
+        self.startup_progress_var = tk.DoubleVar()
+        self.startup_progress_bar = ttk.Progressbar(loading_frame, 
+                                                   variable=self.startup_progress_var,
+                                                   length=350, mode='determinate')
+        self.startup_progress_bar.pack(pady=(0, 10))
+        
+        # Status label
+        self.startup_status_label = tk.Label(loading_frame, text="Scanning for datasets...", 
+                                            bg=self.colors['bg_main'], fg=self.colors['text_accent'],
+                                            font=("Arial", 9))
+        self.startup_status_label.pack()
+        
+        # Force update to show the window
+        self.loading_window.update()
+    
+    def update_startup_progress(self, progress, status_text):
+        """Update the startup loading progress."""
+        if hasattr(self, 'startup_progress_var'):
+            self.startup_progress_var.set(progress)
+            self.startup_status_label.config(text=status_text)
+            self.loading_window.update()
+    
+    def hide_startup_loading(self):
+        """Hide the startup loading window."""
+        if hasattr(self, 'loading_window'):
+            self.loading_window.destroy()
+            delattr(self, 'loading_window')
+    
+    def load_all_datasets_on_startup(self):
+        """Load all datasets on startup with progress indication for autonomous operation."""
+        try:
+            self.update_startup_progress(10, "Checking movement_recordings directory...")
+            
+            if not os.path.exists("movement_recordings"):
+                self.update_startup_progress(100, "No datasets found - ready for recording")
+                self.root.after(1000, self.hide_startup_loading)  # Hide after 1 second
+                print("📁 No movement_recordings directory - system ready for fresh recordings")
+                return
+            
+            # Get list of all dataset files
+            self.update_startup_progress(20, "Scanning dataset files...")
+            all_files = [f for f in os.listdir("movement_recordings") if f.endswith('.json')]
+            total_files = len(all_files)
+            
+            if total_files == 0:
+                self.update_startup_progress(100, "No datasets found - ready for recording")
+                self.root.after(1000, self.hide_startup_loading)
+                print("📁 No dataset files found - system ready for fresh recordings")
+                return
+            
+            self.update_startup_progress(30, f"Loading {total_files} dataset files...")
+            
+            # Initialize dataset storage
+            self.available_datasets = {}
+            self.dataset_info = {}
+            
+            compatible_files = 0
+            incompatible_files = 0
+            
+            # Process each file with progress updates
+            for i, filename in enumerate(all_files):
+                file_progress = 30 + int((i / total_files) * 60)  # 30% to 90%
+                self.update_startup_progress(file_progress, f"Loading {filename}...")
+                
+                filepath = os.path.join("movement_recordings", filename)
+                try:
+                    with open(filepath, 'r') as f:
+                        data = json.load(f)
+                    
+                    # Check format compatibility (same logic as refresh_datasets)
+                    format_version = data.get('format_version', 'unknown')
+                    markov_chain = data.get('markov_chain', {})
+                    
+                    is_current_format = (format_version == '2.0_servo_based' and 
+                                      'servo_transitions' in markov_chain and
+                                      'servo_movements' in data)
+                    
+                    is_compatible_old_format = (format_version == 'unknown' and
+                                              'servo_transitions' in markov_chain and
+                                              'movements' in data)
+                    
+                    is_recent_format = (format_version == 'unknown' and
+                                      'movement_count' in data and
+                                      'movements' in data)
+                    
+                    if is_current_format or is_compatible_old_format or is_recent_format:
+                        emotion = data.get('emotion', 'unknown')
+                        if emotion not in self.available_datasets:
+                            self.available_datasets[emotion] = []
+                        
+                        # Extract dataset info (same logic as refresh_datasets)
+                        timestamp = data.get('timestamp', 'unknown')
+                        if is_current_format:
+                            sample_count = data.get('movement_count', 0)
+                        elif is_recent_format:
+                            sample_count = data.get('movement_count', 0)
+                        else:
+                            sample_count = data.get('movement_count', len(data.get('movements', [])))
+                        
+                        duration = data.get('duration', 0)
+                        unique_states = markov_chain.get('unique_states', 0)
+                        custom_name = data.get('custom_name', '')
+                        
+                        if custom_name:
+                            display_name = custom_name
+                        else:
+                            display_name = f"Recording-{timestamp}"
+                        
+                        dataset_info = {
+                            'filename': filename,
+                            'filepath': filepath,
+                            'emotion': emotion,
+                            'timestamp': timestamp,
+                            'sample_count': sample_count,
+                            'duration': duration,
+                            'unique_states': unique_states,
+                            'display_name': display_name,
+                            'custom_name': custom_name,
+                            'data': data
+                        }
+                        
+                        self.available_datasets[emotion].append(dataset_info)
+                        self.dataset_info[filename] = dataset_info
+                        compatible_files += 1
+                    else:
+                        incompatible_files += 1
+                        print(f"⚠️ Skipping incompatible file: {filename}")
+                        
+                except Exception as e:
+                    print(f"❌ Error loading {filename}: {e}")
+                    incompatible_files += 1
+            
+            # Sort datasets by timestamp (newest first)
+            self.update_startup_progress(90, "Sorting datasets...")
+            for emotion in self.available_datasets:
+                try:
+                    self.available_datasets[emotion].sort(key=lambda x: str(x['timestamp']), reverse=True)
+                except Exception as e:
+                    print(f"⚠️ Error sorting datasets for {emotion}: {e}")
+                    self.available_datasets[emotion].sort(key=lambda x: x['filename'], reverse=True)
+            
+            # Update dataset displays for all emotions
+            self.update_startup_progress(95, "Updating interface...")
+            self.update_dataset_display()
+            
+            # Auto-select datasets for each emotion if available
+            for emotion in self.emotional_states.keys():
+                if emotion in self.available_datasets and self.available_datasets[emotion]:
+                    # Auto-select the most recent dataset for each emotion
+                    first_dataset = self.available_datasets[emotion][0]
+                    self.active_datasets[emotion] = first_dataset['filename']
+                    
+                    # Pre-load the Markov chain for immediate use
+                    try:
+                        data = first_dataset['data']
+                        markov_chain = data.get('markov_chain', {})
+                        if markov_chain:
+                            self.markov_chains[emotion] = markov_chain
+                            print(f"🔗 Pre-loaded Markov chain for {emotion}: {markov_chain.get('unique_states', 0)} states")
+                    except Exception as e:
+                        print(f"⚠️ Error pre-loading chain for {emotion}: {e}")
+            
+            # Final status
+            self.update_startup_progress(100, f"Ready! Loaded {compatible_files} datasets for {len(self.available_datasets)} emotions")
+            
+            # Auto-hide loading window after 2 seconds
+            self.root.after(2000, self.hide_startup_loading)
+            
+            print(f"✅ STARTUP COMPLETE: Loaded {compatible_files} compatible datasets for {len(self.available_datasets)} emotions")
+            if incompatible_files > 0:
+                print(f"⚠️ Skipped {incompatible_files} incompatible files")
+            
+            print(f"🚀 System ready for autonomous operation with pre-loaded datasets!")
+            
+        except Exception as e:
+            print(f"❌ Error during startup dataset loading: {e}")
+            self.update_startup_progress(100, "Error loading datasets - manual refresh may be needed")
+            self.root.after(3000, self.hide_startup_loading)
 
 
 def main():
@@ -4611,14 +5106,25 @@ def main():
     # Create and run the interface
     interface = CleanCursorInterface()
     
+    def on_closing():
+        """Handle application closing - cleanup timers and resources."""
+        print("🧹 Application closing - cleaning up...")
+        interface.cleanup_all_timers()
+        interface.root.destroy()
+    
+    # Set up proper window close handler
+    interface.root.protocol("WM_DELETE_WINDOW", on_closing)
+    
     try:
         # Start the tkinter main loop
         interface.root.mainloop()
     except KeyboardInterrupt:
         print("\n[INFO] Interrupted by user")
+        interface.cleanup_all_timers()
     except Exception as e:
         print(f"[ERROR] Error: {e}")
         traceback.print_exc()
+        interface.cleanup_all_timers()
     finally:
         # Cleanup
         if hasattr(interface, 'hand_controller') and interface.hand_controller:
