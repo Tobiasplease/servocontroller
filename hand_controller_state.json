@@ -1,6 +1,6 @@
 {
-  "emotion_state": "energized_engaged",
-  "mood_value": 0.9199999999999999,
-  "timestamp": 1755215068.8295293,
+  "emotion_state": "alert_curious",
+  "mood_value": 0.7299999999999996,
+  "timestamp": 1755251972.370679,
   "source": "machine_py_bridge"
 }

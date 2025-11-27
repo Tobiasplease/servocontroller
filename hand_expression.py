@@ -35,8 +35,8 @@ class HandExpressionController:
             time.sleep(2)  # Arduino boot time
             if not self.clean_output:
                 print(f"✅ Connected to hand controller on {self.port} at {self.baudrate} baud")
-            # Send test command to verify connection
-            test_command = "HAND,90,90,90,90\n"
+            # Send test command to verify connection (8 servos)
+            test_command = "HAND8,90,90,90,90,90,90,90,90\n"
             self.serial_connection.write(test_command.encode())
             if not self.clean_output:
                 print(f"📤 Test command sent: {test_command.strip()}")
@@ -48,10 +48,10 @@ class HandExpressionController:
     def set_hand_positions(self, positions: list):
         """
         Set hand positions with proper throttling.
-        positions: list of 4 angles [index, middle, ring, pinky] (0-180 degrees)
+        positions: list of 8 angles [thumb, index, middle, ring, pinky, wrist_rotate, wrist_tilt, elbow] (0-180 degrees)
         """
-        if len(positions) != 4:
-            raise ValueError("Must provide exactly 4 positions for 4 fingers")
+        if len(positions) != 8:
+            raise ValueError("Must provide exactly 8 positions for 5 fingers + 3 arm servos")
         
         if not self.serial_connection:
             return
@@ -62,22 +62,28 @@ class HandExpressionController:
         if current_time - self.last_command_time < self.min_command_interval:
             return
         
-        # Convert to finger dictionary for position change detection
+        # Convert to servo dictionary for position change detection (8 servos: 5 fingers + 3 arm)
         finger_positions = {}
         for i, angle in enumerate(positions):
-            # Clamp to Arduino range (40-130°)
-            arduino_min = 40
-            arduino_max = 130
-            arduino_center = 85
-            arduino_range = 90
+            # Wrist servo (index 7) gets full range, others get limited range
+            if i == 7:  # Wrist servo
+                # Use full servo range (0-180°) for wrist
+                arduino_position = max(0, min(180, int(angle)))
+            else:
+                # Clamp other servos to safe range (40-130°)
+                arduino_min = 40
+                arduino_max = 130
+                arduino_center = 85
+                arduino_range = 90
+                
+                # Convert from 0-180° system to Arduino's 40-130° system
+                offset_from_center = angle - 90.0
+                arduino_offset = (offset_from_center / 90.0) * (arduino_range / 2.0)
+                arduino_position = arduino_center + arduino_offset
+                arduino_position = max(arduino_min, min(arduino_max, arduino_position))
+                arduino_position = int(arduino_position)
             
-            # Convert from 0-180° system to Arduino's 40-130° system
-            offset_from_center = angle - 90.0
-            arduino_offset = (offset_from_center / 90.0) * (arduino_range / 2.0)
-            arduino_position = arduino_center + arduino_offset
-            arduino_position = max(arduino_min, min(arduino_max, arduino_position))
-            
-            finger_positions[f"finger{i}"] = int(arduino_position)
+            finger_positions[f"finger{i}"] = arduino_position
         
         # Position change detection: Only send if positions changed significantly
         if self.last_sent_positions:
@@ -92,9 +98,9 @@ class HandExpressionController:
                 return  # Skip sending - positions haven't changed enough
         
         try:
-            # Send command in format expected by Arduino: "HAND,f0,f1,f2,f3\n"
-            pos_list = [finger_positions.get(f"finger{i}", 85) for i in range(4)]
-            command = f"HAND,{','.join(map(str, pos_list))}\n"
+            # Send command in format expected by Arduino: "HAND8,f0,f1,f2,f3,f4,arm0,arm1,arm2\n"
+            pos_list = [finger_positions.get(f"finger{i}", 85) for i in range(8)]
+            command = f"HAND8,{','.join(map(str, pos_list))}\n"
             self.serial_connection.write(command.encode())
             
             # Update tracking variables

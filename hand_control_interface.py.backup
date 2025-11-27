@@ -227,15 +227,6 @@ class CleanCursorInterface:
         self.finger_lock_targets = [90.0] * self.num_fingers # Target positions for locked fingers
         self.pressed_keys = set()                           # Currently pressed keys
         
-        # NEW: ARM SERVO CONTROL - Same pattern as fingers
-        self.num_arm_servos = 3
-        self.arm_positions = [90.0] * self.num_arm_servos  # wrist_rotate, wrist_tilt, elbow
-        self.arm_targets = [90.0] * self.num_arm_servos
-        self.arm_names = ['Wrist Rotate', 'Wrist Tilt', 'Elbow']
-        self.finger_names = ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky']
-        self.arm_locks = [False] * self.num_arm_servos       # Which arm servos are keyboard-locked
-        self.arm_lock_targets = [90.0] * self.num_arm_servos  # Target positions for locked arm servos
-        
         # ULTRA SIMPLE keyboard control parameters - NO TIMERS!
         self.keyboard_step_size = 2.0        # SMALLER steps for smoother control
         
@@ -247,10 +238,8 @@ class CleanCursorInterface:
             't': (3, 'up'),    'g': (3, 'down')     # Pinky finger (F4)
         }
         
-        print(f"🎯 Initialized {self.num_fingers} finger positions: {self.finger_positions}")
-        print(f"🎯 Initialized {self.num_fingers} finger targets: {self.finger_targets}")
-        print(f"🦾 Initialized {self.num_arm_servos} arm positions: {self.arm_positions}")
-        print(f"🦾 Initialized {self.num_arm_servos} arm targets: {self.arm_targets}")
+        print(f"🎯 Initialized finger positions: {self.finger_positions}")
+        print(f"🎯 Initialized finger targets: {self.finger_targets}")
         
         # Wave control parameters - the good stuff!
         self.cursor_sensitivity = tk.DoubleVar(value=3.0)
@@ -352,10 +341,8 @@ class CleanCursorInterface:
         self.live_keyboard_limit = 200  # Keep only recent movements for live generation
         
         # === ENHANCED DATASET CYCLING SYSTEM ===
-        self.dataset_cycling_enabled = tk.BooleanVar(value=True)  # Auto-enabled for machine.py integration
-        self.dataset_cycle_interval_min = 10.0  # Minimum 10 seconds between switches
-        self.dataset_cycle_interval_max = 60.0  # Maximum 60 seconds between switches
-        self.dataset_cycle_interval = self._get_random_cycle_interval()  # Start with random interval
+        self.dataset_cycling_enabled = tk.BooleanVar(value=False)
+        self.dataset_cycle_interval = 20.0  # 20 seconds between dataset switches
         self.last_dataset_switch_time = 0
         self.current_dataset_index = 0  # Index in available datasets for current emotion
         
@@ -433,16 +420,13 @@ class CleanCursorInterface:
     
     def _finalize_startup_display(self):
         """Finalize the dataset display after startup loading is complete."""
-        print("🔄 Finalizing dataset display after startup...")
-        # Force update the current emotion display
-        self.update_emotion_dataset_display()
-        # Also update the dropdown to show proper data
-        self.refresh_emotion_datasets()
-        # Update UI status for current emotion
-        if hasattr(self, 'update_markov_status_for_emotion'):
-            self.update_markov_status_for_emotion(self.current_emotional_state)
-        print("✅ Startup dataset display finalized")
-        self._startup_loading_complete = True
+        if hasattr(self, '_startup_loading_complete') and self._startup_loading_complete:
+            print("🔄 Finalizing dataset display after startup...")
+            # Force update the current emotion display
+            self.update_emotion_dataset_display()
+            # Also update the dropdown to show proper data
+            self.refresh_emotion_datasets()
+            print("✅ Startup dataset display finalized")
     
     def _on_mousewheel(self, event):
         """Handle mouse wheel scrolling in the interface."""
@@ -633,9 +617,6 @@ class CleanCursorInterface:
         self.progress_frame = ttk.Frame(self.progress_container)
         # Don't pack it initially - it will be packed inside the fixed container when needed
         
-        # === NEW: INDIVIDUAL SERVO CONTROL SECTION ===
-        # self.create_servo_control_section(canvas_side_frame)  # TODO: Add this method
-        
         # Center the progress bar elements
         progress_center_frame = ttk.Frame(self.progress_frame)
         progress_center_frame.pack(expand=True)
@@ -799,7 +780,7 @@ class CleanCursorInterface:
         dataset_cycle_frame.pack(fill=tk.X, pady=(0, 5))
         
         self.dataset_cycle_cb = ttk.Checkbutton(dataset_cycle_frame, 
-                                               text="🎲 Auto-cycle datasets (10s-1min intervals)", 
+                                               text="🎲 Auto-cycle datasets (20sec intervals)", 
                                                variable=self.dataset_cycling_enabled,
                                                command=self.on_dataset_cycling_toggle)
         self.dataset_cycle_cb.pack(side=tk.LEFT)
@@ -1235,13 +1216,11 @@ class CleanCursorInterface:
         """Update dataset and emotion cycling behavior."""
         current_time = time.time()
         
-        # Handle dataset cycling (random intervals between 10s-1min)
+        # Handle dataset cycling (every 1 minute)
         if (self.dataset_cycling_enabled.get() and 
             current_time - self.last_dataset_switch_time >= self.dataset_cycle_interval):
             self.cycle_to_next_dataset()
             self.last_dataset_switch_time = current_time
-            # Set new random interval for next cycle
-            self.dataset_cycle_interval = self._get_random_cycle_interval()
         
         # Handle emotion cycling (every 3 minutes) 
         if (self.emotion_cycling_enabled.get() and 
@@ -1293,21 +1272,16 @@ class CleanCursorInterface:
             
             try:
                 current_index = display_names.index(current_dataset)
-                # RANDOM SELECTION instead of sequential cycling
-                available_indices = [i for i in range(len(display_names)) if i != current_index]
-                if available_indices:
-                    next_index = random.choice(available_indices)
-                else:
-                    next_index = current_index  # Only one dataset available
+                next_index = (current_index + 1) % len(display_names)
             except ValueError:
-                # Current dataset not in list, pick random starting point
-                next_index = random.randint(0, len(display_names) - 1)
-                print(f"⚠️ Current dataset not found in list, randomly selecting dataset")
+                # Current dataset not in list, start from 0
+                next_index = 0
+                print(f"⚠️ Current dataset not found in list, starting from first dataset")
             
             next_dataset = display_names[next_index]
             next_dataset_info = available_datasets[next_index]
             
-            print(f"🎲 Random dataset switch: {emotion} → {next_dataset}")
+            print(f"🎲 Dataset cycling: {emotion} → {next_dataset}")
             print(f"📁 Using file: {next_dataset_info['filename']}")
             
             # Start smooth transition to new dataset
@@ -1780,10 +1754,6 @@ class CleanCursorInterface:
                 foreground="green"
             )
     
-    def _get_random_cycle_interval(self):
-        """Generate a random interval between 10-60 seconds for more organic behavior"""
-        return random.randint(int(self.dataset_cycle_interval_min), int(self.dataset_cycle_interval_max))
-    
     def switch_emotional_state(self, emotion_name):
         """Switch to a different emotional state and update movement parameters."""
         if emotion_name not in self.emotional_states:
@@ -1800,8 +1770,6 @@ class CleanCursorInterface:
         
         print(f"🎭 Switched to {emotion_name} emotional state")
         print(f"📊 Parameters: sensitivity={params['cursor_sensitivity']:.1f}")
-        # Update UI status for current emotion
-        self.update_markov_status_for_emotion(emotion_name)
         
         # Update CLEARER dataset display for new emotion
         self.update_emotion_dataset_display()
@@ -1810,37 +1778,6 @@ class CleanCursorInterface:
         if len(self.available_datasets) == 0:
             print("🔄 No datasets loaded, refreshing...")
             self.refresh_datasets()
-
-        # Auto-start Markov generation for the new emotional state
-        # Stop any current generation first
-        if self.generating:
-            self.stop_markov_generation()
-        
-        # Start generation for the new emotional state if possible
-        print(f"🤖 Auto-starting Markov generation for {emotion_name}")
-        
-        # Ensure startup is complete before proceeding
-        if not hasattr(self, '_startup_loading_complete') or not self._startup_loading_complete:
-            print(f"⏳ Completing startup initialization for {emotion_name}...")
-            self._finalize_startup_display()
-            self._startup_loading_complete = True
-        
-        # Force refresh of datasets and UI for current emotion  
-        self.refresh_emotion_datasets()
-        self.update_markov_status_for_emotion(emotion_name)
-        
-        # First build Markov chain if not available
-        if self.current_emotional_state not in self.markov_chains:
-            print(f"🔗 Building Markov chain for {emotion_name}...")
-            self.build_markov_chain()
-            
-        # Check if we now have a Markov chain to use
-        if self.current_emotional_state in self.markov_chains:
-            print(f"✅ Markov chain available for {emotion_name} - starting generation")
-            # Simulate clicking the Generate button to ensure proper UI state
-            self.generate_btn.invoke()  # This properly triggers the button
-        else:
-            print(f"⚠️ Could not build Markov chain for {emotion_name} - no recorded movements available")
     
     def check_mood_file(self):
         """Check mood file from machine.py and auto-switch emotional state if needed."""
@@ -2803,23 +2740,12 @@ class CleanCursorInterface:
         if current_time - self.last_send_time < self.send_interval:
             return
         
-        # Check if positions changed significantly (fingers OR arm)
+        # Check if positions changed significantly
         changed = False
-        # Check finger positions (with safety check for array length)
-        last_finger_positions = getattr(self, 'last_sent_finger_positions', [90]*self.num_fingers)
-        if len(last_finger_positions) != self.num_fingers:
-            last_finger_positions = [90]*self.num_fingers  # Reset if size mismatch
-        
         for i in range(self.num_fingers):
-            if abs(self.finger_positions[i] - last_finger_positions[i]) > self.position_threshold:
+            if abs(self.finger_positions[i] - getattr(self, 'last_sent_positions', [90]*4)[i]) > self.position_threshold:
                 changed = True
                 break
-        # Check arm positions
-        if not changed:
-            for i in range(self.num_arm_servos):
-                if abs(self.arm_positions[i] - getattr(self, 'last_sent_arm_positions', [90]*self.num_arm_servos)[i]) > self.position_threshold:
-                    changed = True
-                    break
         
         if changed or current_time - getattr(self, 'last_any_send_time', 0) > 1.0:
             try:
@@ -2835,29 +2761,12 @@ class CleanCursorInterface:
                 default_pos = self.default_position.get()
                 
                 positions = []
-                # Process finger positions (5 fingers)
                 for i in range(self.num_fingers):
                     # Calculate offset from default position
                     offset_from_default = self.finger_positions[i] - default_pos
                     
                     # Scale based on actual servo_range setting
                     # This makes the servo_range slider actually control the movement range
-                    normalized_offset = offset_from_default / current_servo_range
-                    
-                    # Map to Arduino's available range (now full 0-180°)
-                    arduino_offset = normalized_offset * (arduino_range / 2.0)
-                    arduino_position = arduino_center + arduino_offset
-                    
-                    # Clamp to Arduino's actual limits (now 0-180°)
-                    arduino_position = max(arduino_min, min(arduino_max, arduino_position))
-                    positions.append(int(arduino_position))
-                
-                # Process arm positions (3 arm servos) - same mapping as fingers
-                for i in range(self.num_arm_servos):
-                    # Calculate offset from default position
-                    offset_from_default = self.arm_positions[i] - default_pos
-                    
-                    # Scale based on actual servo_range setting
                     normalized_offset = offset_from_default / current_servo_range
                     
                     # Map to Arduino's available range (now full 0-180°)
@@ -2875,14 +2784,12 @@ class CleanCursorInterface:
                     self.send_count = 1
                 
                 if self.send_count < 5 or self.send_count % 20 == 0:
-                    print(f"📤 Sending {self.send_count}: arduino_positions={positions[:5]} (fingers) + {positions[5:]} (arm) from finger_positions={[f'{p:.1f}' for p in self.finger_positions]} arm_positions={[f'{p:.1f}' for p in self.arm_positions]} (mapped to 0-180°)")
+                    print(f"📤 Sending {self.send_count}: arduino_positions={positions} from finger_positions={[f'{p:.1f}' for p in self.finger_positions]} (mapped to 40-130°)")
                 
-                # Send all 8 servo positions (5 fingers + 3 arm servos)
+                # Use the WORKING method from the working version
                 self.hand_controller.set_hand_positions(positions)
                 
-                # Track both finger and arm positions separately
-                self.last_sent_finger_positions = self.finger_positions.copy()
-                self.last_sent_arm_positions = self.arm_positions.copy()
+                self.last_sent_positions = self.finger_positions.copy()
                 self.last_send_time = current_time
                 self.last_any_send_time = current_time
                 
@@ -2998,8 +2905,7 @@ class CleanCursorInterface:
         # Show progress bar inside the fixed container (no UI shift!)
         self.progress_frame.pack(expand=True, fill=tk.BOTH)  # Fill the fixed container
         self.progress_var.set(0)
-        recording_duration = self.max_recording_points / 40  # 40Hz sampling rate
-        self.progress_label.config(text=f"0:00 / {int(recording_duration//60):01d}:{int(recording_duration%60):02d} (0%)")  # Dynamic duration display
+        self.progress_label.config(text="0:00 / 0:20 (0%)")  # 20 seconds for stable rich data collection
         
         print(f"🎬 Started TIME-BASED recording for {self.current_emotional_state}")
         print(f"⏰ Sampling at {1/self.record_interval:.0f} Hz (captures easing motions!)")
@@ -3749,29 +3655,6 @@ class CleanCursorInterface:
             print(f"❌ Error loading Markov chain from dataset: {e}")
             return False
     
-
-    def update_markov_status_for_emotion(self, emotion):
-        """Update the UI markov_status to reflect available chains for an emotion."""
-        if emotion in self.markov_chains:
-            chain = self.markov_chains[emotion]
-            if isinstance(chain, dict):
-                unique_states = chain.get('unique_states', 0)
-                if chain.get('second_order_enabled', False):
-                    second_order_keys = chain.get('unique_second_order_keys', 0)
-                    self.markov_status.config(text=f"{unique_states} states, {second_order_keys} 2nd-order keys", foreground="green")
-                else:
-                    avg_transitions = 0
-                    if 'servo_transitions' in chain:
-                        transitions = chain['servo_transitions']
-                        if transitions:
-                            avg_transitions = sum(len(t) for t in transitions.values()) / len(transitions)
-                    self.markov_status.config(text=f"{unique_states} states, {avg_transitions:.1f} avg transitions", foreground="green")
-                print(f"🎯 UI status updated for {emotion}: chain available")
-            else:
-                self.markov_status.config(text="Chain format unknown", foreground="orange")
-        else:
-            self.markov_status.config(text="No chains built", foreground="gray")
-
     def delete_dataset(self):
         """Delete the currently selected dataset."""
         if not self.dataset_var.get():
@@ -4497,9 +4380,9 @@ File: {dataset['filename']}
                                 self.finger_positions[i] = target_pos  # Pure data application - no artificial smoothing
                             
                             movement_phase = next_state[4] if len(next_state) > 4 else 'MEDIUM'
-                            # Silenced raw data output
+                            print(f"🎯 Raw data: {movement_phase} movement (dt={self.generation_speed:.3f}s) - preserving original characteristics")
                         
-                        # Silenced 2nd-order output
+                        print(f"🔗 2nd-order: {lookup_key} → {next_state_key} (dt={self.generation_speed:.3f}s)")
                         self.send_to_hand_controller()
                         return
                     else:
