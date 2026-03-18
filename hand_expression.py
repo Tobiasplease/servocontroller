@@ -70,13 +70,13 @@ class HandExpressionController:
                 # Use full servo range (0-180°) for wrist
                 arduino_position = max(0, min(180, int(angle)))
             else:
-                # Clamp other servos to safe range (40-130°)
-                arduino_min = 40
-                arduino_max = 130
-                arduino_center = 85
-                arduino_range = 90
+                # Clamp other servos to safe range (10-170°)
+                arduino_min = 10
+                arduino_max = 170
+                arduino_center = 90
+                arduino_range = 160
                 
-                # Convert from 0-180° system to Arduino's 40-130° system
+                # Convert from 0-180° system to Arduino's 10-170° system
                 offset_from_center = angle - 90.0
                 arduino_offset = (offset_from_center / 90.0) * (arduino_range / 2.0)
                 arduino_position = arduino_center + arduino_offset

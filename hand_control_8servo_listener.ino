@@ -1,22 +1,27 @@
 /*
- * 8-Servo Hand Control Listener
- * Listens for HAND8 commands from Python and sets servo positions
- * 
- * Pin mapping (reversed order to match wiring):
- * Pin 12: Thumb (servo 0)
- * Pin 11: Index (servo 1)
- * Pin 10: Middle (servo 2)
- * Pin 9: Ring (servo 3)
- * Pin 8: Pinky (servo 4)
- * Pin 7: Shoulder (servo 5)
- * Pin 6: Elbow (servo 6)
- * Pin 5: Wrist (servo 7)
+ * 8-Servo Hand Control Listener (ACTIVE)
+ * Receives: "HAND8,pos0,pos1,pos2,pos3,pos4,pos5,pos6,pos7"
+ *
+ * Exact command index -> servo -> pin mapping:
+ * pos0 -> Thumb    -> D12
+ * pos1 -> Index    -> D11
+ * pos2 -> Middle   -> D10
+ * pos3 -> Ring     -> D9
+ * pos4 -> Pinky    -> D8
+ * pos5 -> Shoulder -> D7
+ * pos6 -> Elbow    -> D6
+ * pos7 -> Wrist    -> D5
+ *
+ * Note: Arm servos are Shoulder=D7, Elbow=D6, Wrist=D5.
  */
 
 #include <Servo.h>
 
 const int NUM_SERVOS = 8;
 const int pins[NUM_SERVOS] = {12, 11, 10, 9, 8, 7, 6, 5};  // Reversed order
+const char* servoNames[NUM_SERVOS] = {
+  "Thumb", "Index", "Middle", "Ring", "Pinky", "Shoulder", "Elbow", "Wrist"
+};
 
 Servo servos[NUM_SERVOS];
 int currentPositions[NUM_SERVOS];
@@ -34,6 +39,15 @@ void setup() {
   
   delay(1000);
   Serial.println("8-Servo Hand Control Ready - Listening for HAND8 commands");
+  Serial.println("Command mapping: pos0..pos7 -> servo -> pin");
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    Serial.print("pos");
+    Serial.print(i);
+    Serial.print(" -> ");
+    Serial.print(servoNames[i]);
+    Serial.print(" -> D");
+    Serial.println(pins[i]);
+  }
 }
 
 void loop() {

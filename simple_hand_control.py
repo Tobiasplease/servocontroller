@@ -188,8 +188,24 @@ class SimpleHandControl:
                  command=self.capture_keyframe,
                  bg=self.colors['button_bg'], font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
         
+        tk.Button(record_controls, text="💾 Save", 
+                 command=self.save_recording,
+                 bg=self.colors['button_bg'], font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+        
+        tk.Button(record_controls, text="📂 Load", 
+                 command=self.load_recording,
+                 bg=self.colors['button_bg'], font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+        
         tk.Button(record_controls, text="📤 Export", 
                  command=self.export_arduino_code,
+                 bg=self.colors['button_bg'], font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+        
+        tk.Button(record_controls, text="🎲 Markov Export", 
+                 command=self.export_markov_arduino,
+                 bg=self.colors['button_bg'], font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+        
+        tk.Button(record_controls, text="🔌 Connect", 
+                 command=self.reconnect_arduino,
                  bg=self.colors['button_bg'], font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
         
         tk.Button(record_controls, text="🗑️", 
@@ -1083,10 +1099,21 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             # Auto mode: use longest layer
             max_duration = max(layer['duration'] for layer in self.recorded_layers)
         
+        # Smooth loop transition - use last 10% of loop for blending
+        blend_zone = max_duration * 0.1  # 10% of loop duration for smooth transition
+        is_blending = elapsed >= (max_duration - blend_zone)
+        
         # Loop back to start when loop duration reached
         if elapsed >= max_duration:
             self.playback_start_time = time.time()
             elapsed = 0
+            is_blending = False
+        
+        # Calculate blend factor if we're in the transition zone
+        if is_blending:
+            blend_factor = (elapsed - (max_duration - blend_zone)) / blend_zone  # 0.0 to 1.0
+        else:
+            blend_factor = 0.0
         
         # Apply positions from ALL layers simultaneously
         for layer in self.recorded_layers:
@@ -1094,21 +1121,57 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             data = layer['data']
             recorded_servos = layer.get('recorded_servos', {'fingers': set(), 'arm': set()})
             
+            if not data:
+                continue
+            
             # Map current time to this layer's timeline proportionally
             # All layers loop at the same rate for perfect sync
             normalized_time = (elapsed / max_duration) * duration if max_duration > 0 else 0
             
+            # Find current and start positions for blending
+            current_point = None
+            start_point = data[0]  # First frame
+            
             # Find the closest data point for current time in this layer
             for point in data:
                 if point['time'] >= normalized_time:
-                    # ONLY apply positions for servos that were recorded in THIS layer
-                    for finger_idx in recorded_servos.get('fingers', []):
-                        if finger_idx < len(self.finger_positions):
-                            self.finger_positions[finger_idx] = point['finger_positions'][finger_idx]
-                    for arm_idx in recorded_servos.get('arm', []):
-                        if arm_idx < len(self.arm_positions):
-                            self.arm_positions[arm_idx] = point['arm_positions'][arm_idx]
+                    current_point = point
                     break
+            
+            # If we didn't find a point, use the last one
+            if current_point is None:
+                current_point = data[-1]
+            
+            # Apply positions with optional blending
+            for finger_idx in recorded_servos.get('fingers', []):
+                if finger_idx < len(self.finger_positions):
+                    current_pos = current_point['finger_positions'][finger_idx]
+                    if current_pos is not None:
+                        if is_blending:
+                            # Blend between current position and start position
+                            start_pos = start_point['finger_positions'][finger_idx]
+                            if start_pos is not None:
+                                blended_pos = current_pos * (1 - blend_factor) + start_pos * blend_factor
+                                self.finger_positions[finger_idx] = blended_pos
+                            else:
+                                self.finger_positions[finger_idx] = current_pos
+                        else:
+                            self.finger_positions[finger_idx] = current_pos
+            
+            for arm_idx in recorded_servos.get('arm', []):
+                if arm_idx < len(self.arm_positions):
+                    current_pos = current_point['arm_positions'][arm_idx]
+                    if current_pos is not None:
+                        if is_blending:
+                            # Blend between current position and start position
+                            start_pos = start_point['arm_positions'][arm_idx]
+                            if start_pos is not None:
+                                blended_pos = current_pos * (1 - blend_factor) + start_pos * blend_factor
+                                self.arm_positions[arm_idx] = blended_pos
+                            else:
+                                self.arm_positions[arm_idx] = current_pos
+                        else:
+                            self.arm_positions[arm_idx] = current_pos
     
     def set_loop_to_longest(self):
         """Set loop duration to the longest recorded layer."""
@@ -1134,20 +1197,35 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
                 self.stop_recording()
                 return
         
-        # Track which servos changed (for selective playback)
-        if len(self.current_layer_data) > 0:
-            prev = self.current_layer_data[-1]
-            for i, (curr, prev_val) in enumerate(zip(self.finger_positions, prev['finger_positions'])):
-                if abs(curr - prev_val) > 1.0:  # Changed by more than 1 degree
-                    self.recorded_servos['fingers'].add(i)
-            for i, (curr, prev_val) in enumerate(zip(self.arm_positions, prev['arm_positions'])):
-                if abs(curr - prev_val) > 1.0:
-                    self.recorded_servos['arm'].add(i)
-            
+        # Determine which servos to record based on control mode
+        if self.control_mode.get() == 'cursor':
+            # Cursor mode: only record finger positions
+            finger_positions = self.finger_positions.copy()
+            arm_positions = [None] * self.num_arm_servos
+            # Mark all fingers as recorded
+            for i in range(self.num_fingers):
+                self.recorded_servos['fingers'].add(i)
+        else:
+            # Manual mode: only record the selected servo
+            selected = self.selected_servo.get()
+            if selected < self.num_fingers:
+                # Selected finger
+                finger_positions = [None] * self.num_fingers
+                finger_positions[selected] = self.finger_positions[selected]
+                arm_positions = [None] * self.num_arm_servos
+                self.recorded_servos['fingers'].add(selected)
+            else:
+                # Selected arm servo
+                finger_positions = [None] * self.num_fingers
+                arm_positions = [None] * self.num_arm_servos
+                arm_idx = selected - self.num_fingers
+                arm_positions[arm_idx] = self.arm_positions[arm_idx]
+                self.recorded_servos['arm'].add(arm_idx)
+        
         point = {
             'time': time.time() - self.layer_record_start_time,
-            'finger_positions': self.finger_positions.copy(),
-            'arm_positions': self.arm_positions.copy(),
+            'finger_positions': finger_positions,
+            'arm_positions': arm_positions,
             'control_mode': self.control_mode.get()
         }
         
@@ -1161,6 +1239,121 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         self.loop_duration.set(0.0)  # Reset loop duration constraint
         self.update_layer_list()
         print("🗑️ All layers and keyframes cleared - loop duration reset")
+    
+    def save_recording(self):
+        """Save all recorded layers to a JSON file."""
+        if not self.recorded_layers:
+            tkinter.messagebox.showwarning("Nothing to Save", "No recorded layers to save!")
+            return
+        
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"hand_recording_{timestamp}.json"
+        
+        try:
+            # Prepare data for saving (exclude non-serializable objects)
+            layers_to_save = []
+            for layer in self.recorded_layers:
+                layer_copy = {
+                    'name': layer['name'],
+                    'duration': layer['duration'],
+                    'control_mode': layer['control_mode'],
+                    'data': layer['data'],
+                    'timestamp': layer.get('timestamp', '')
+                }
+                # Convert recorded_servos set to list if it exists
+                if 'recorded_servos' in layer:
+                    layer_copy['recorded_servos'] = {
+                        'fingers': list(layer['recorded_servos'].get('fingers', set())),
+                        'arm': list(layer['recorded_servos'].get('arm', set()))
+                    }
+                layers_to_save.append(layer_copy)
+            
+            save_data = {
+                'version': '1.0',
+                'timestamp': timestamp,
+                'loop_duration': self.loop_duration.get(),
+                'layers': layers_to_save,
+                'captured_keyframes': self.captured_keyframes
+            }
+            
+            with open(filename, 'w') as f:
+                json.dump(save_data, f, indent=2)
+            
+            print(f"💾 Saved {len(self.recorded_layers)} layers to {filename}")
+            tkinter.messagebox.showinfo("Saved Successfully", f"Recording saved to:\n{filename}")
+        except Exception as e:
+            print(f"❌ Save failed: {e}")
+            tkinter.messagebox.showerror("Save Failed", f"Failed to save recording:\n{e}")
+    
+    def load_recording(self):
+        """Load recorded layers from a JSON file."""
+        from tkinter import filedialog
+        
+        filename = filedialog.askopenfilename(
+            title="Load Recording",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialdir=os.getcwd()
+        )
+        
+        if not filename:
+            return
+        
+        try:
+            with open(filename, 'r') as f:
+                save_data = json.load(f)
+            
+            # Load layers and convert recorded_servos lists back to sets
+            loaded_layers = save_data.get('layers', [])
+            for layer in loaded_layers:
+                if 'recorded_servos' in layer:
+                    # Convert lists back to sets
+                    layer['recorded_servos'] = {
+                        'fingers': set(layer['recorded_servos'].get('fingers', [])),
+                        'arm': set(layer['recorded_servos'].get('arm', []))
+                    }
+                else:
+                    # Create default recorded_servos if missing
+                    layer['recorded_servos'] = {'fingers': set(), 'arm': set()}
+            
+            self.recorded_layers = loaded_layers
+            self.captured_keyframes = save_data.get('captured_keyframes', [])
+            self.loop_duration.set(save_data.get('loop_duration', 0.0))
+            
+            # Update UI
+            self.update_layer_list()
+            
+            print(f"📂 Loaded {len(self.recorded_layers)} layers from {os.path.basename(filename)}")
+            tkinter.messagebox.showinfo("Loaded Successfully", 
+                                       f"Loaded {len(self.recorded_layers)} layers from:\n{os.path.basename(filename)}")
+        except Exception as e:
+            print(f"❌ Load failed: {e}")
+            tkinter.messagebox.showerror("Load Failed", f"Failed to load recording:\n{e}")
+    
+    def reconnect_arduino(self):
+        """Reconnect to Arduino without losing recordings."""
+        if not HAND_CONTROLLER_AVAILABLE:
+            tkinter.messagebox.showerror("Not Available", "Hand controller module not available!")
+            return
+        
+        # Close existing connection if any
+        if self.hand_controller:
+            try:
+                self.hand_controller.serial.close()
+                print("🔌 Closed existing connection")
+            except:
+                pass
+        
+        # Try to reconnect
+        try:
+            self.hand_controller = HandExpressionController(port='COM9', clean_output=True)
+            # Test the connection by sending a center command
+            self.hand_controller.set_hand_positions([90]*8)
+            print("✅ Arduino reconnected on COM9")
+            tkinter.messagebox.showinfo("Connected", "Arduino reconnected successfully on COM9!")
+        except Exception as e:
+            self.hand_controller = None
+            print(f"❌ Reconnect failed: {e}")
+            tkinter.messagebox.showerror("Connection Failed", f"Failed to reconnect Arduino:\n{e}\n\nMake sure Arduino is plugged in and on COM9!")
     
     def capture_keyframe(self):
         """Capture current servo positions as a keyframe."""
@@ -1400,126 +1593,794 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             tkinter.messagebox.showerror("Export Failed", f"Failed to export Arduino code:\\n{e}")
     
     def generate_arduino_code(self):
-        """Generate complete Arduino code from recorded layers."""
+        """Generate complete Arduino code from recorded layers with SIMULTANEOUS playback."""
+        # Calculate keyframe counts
+        total_frames = sum(len(layer['data']) for layer in self.recorded_layers)
+        
+        # Get current playback speed setting
+        playback_speed = self.playback_speed.get()
+        
+        # Determine global loop duration (use loop_duration if set, otherwise max of all layers)
+        if self.loop_duration.get() > 0:
+            max_duration = self.loop_duration.get()
+        else:
+            max_duration = max(layer['duration'] for layer in self.recorded_layers) if self.recorded_layers else 0
+        
+        # Extract keyframes for all layers WITH TIME NORMALIZATION
+        all_layer_keyframes = []
+        for layer in self.recorded_layers:
+            movements = sorted(layer['data'], key=lambda x: x['time'])
+            keyframes = self._extract_keyframes(movements)
+            
+            # TIME NORMALIZE: Scale layer duration to match global loop duration
+            # This ensures layers recorded at different durations sync properly
+            layer_duration = layer['duration']
+            if layer_duration > 0 and max_duration > 0:
+                time_scale = max_duration / layer_duration
+                # Scale all keyframe timestamps
+                for kf in keyframes:
+                    kf['time'] = kf['time'] * time_scale
+            
+            all_layer_keyframes.append({
+                'name': layer['name'],
+                'mode': layer['control_mode'],
+                'duration': layer['duration'],
+                'keyframes': keyframes
+            })
+        
+        # Adjust duration by playback speed (faster speed = shorter duration)
+        adjusted_duration = max_duration / playback_speed
+        
         code = f'''/*
- * 8-Servo Hand Control - Generated Movement Code
+ * 8-Servo Hand Control - Generated Movement Code (SIMULTANEOUS PLAYBACK)
  * Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
  * Layers: {len(self.recorded_layers)}
- * Total Movements: {sum(len(layer['data']) for layer in self.recorded_layers)}
+ * Original Frames Recorded: {total_frames}
+ * Loop Duration: {max_duration:.2f}s (recorded) / {adjusted_duration:.2f}s (at {playback_speed:.1f}x speed)
+ * Playback Speed: {playback_speed:.1f}x
  * 
  * Hardware: 5 Finger Servos + 3 Arm Servos
  * Fingers: {', '.join(self.finger_names)}
  * Arm: {', '.join(self.arm_names)}
+ * 
+ * Pin Mapping (reversed order):
+ * Pin 12 -> Thumb (servo 0)
+ * Pin 11 -> Index (servo 1)
+ * Pin 10 -> Middle (servo 2)
+ * Pin 9  -> Ring (servo 3)
+ * Pin 8  -> Pinky (servo 4)
+ * Pin 7  -> Shoulder (servo 5)
+ * Pin 6  -> Elbow (servo 6)
+ * Pin 5  -> Wrist (servo 7)
  */
 
 #include <Servo.h>
 
-// Servo objects for 8 servos (5 fingers + 3 arm)
+// Servo objects
 Servo servo[8];
+int servoPins[8] = {{12, 11, 10, 9, 8, 7, 6, 5}};
 
-// Servo pins (adjust according to your wiring)
-int servoPins[8] = {{8, 9, 10, 11, 12, 13, 14, 15}};
+// Timing
+unsigned long loopStartTime;
+unsigned long loopDuration = {int(adjusted_duration * 1000)}; // milliseconds (adjusted for {playback_speed:.1f}x speed)
 
-void setup() {{
+// Layer data structures
+'''
+        
+        # Generate data arrays for each layer (using PROGMEM to save RAM)
+        for i, layer_data in enumerate(all_layer_keyframes):
+            keyframes = layer_data['keyframes']
+            code += f"\n// Layer {i+1}: {layer_data['name']} ({layer_data['mode']} mode) - {len(keyframes)} keyframes\n"
+            code += f"const int layer{i+1}_count = {len(keyframes)};\n"
+            code += f"const unsigned long layer{i+1}_times[] PROGMEM = {{"
+            # Adjust keyframe times by playback speed
+            code += ', '.join([str(int((kf['time'] / playback_speed) * 1000)) for kf in keyframes])
+            code += "};\n"
+            
+            # Generate position arrays for each servo (8 servos) - only if servo is actually used
+            for servo_idx in range(8):
+                # Check if this servo is used in this layer
+                has_data = False
+                for kf in keyframes:
+                    if servo_idx < 5:  # Finger servo
+                        pos = kf['finger_positions'][servo_idx]
+                    else:  # Arm servo
+                        pos = kf['arm_positions'][servo_idx - 5]
+                    if pos is not None:
+                        has_data = True
+                        break
+                
+                if has_data:
+                    code += f"const int layer{i+1}_servo{servo_idx}[] PROGMEM = {{"
+                    positions = []
+                    for kf in keyframes:
+                        if servo_idx < 5:  # Finger servo
+                            pos = kf['finger_positions'][servo_idx]
+                        else:  # Arm servo
+                            pos = kf['arm_positions'][servo_idx - 5]
+                        positions.append(str(int(pos)) if pos is not None else "-1")
+                    code += ', '.join(positions)
+                    code += "};\n"
+            
+            code += f"int layer{i+1}_index = 0;\n"
+        
+        # Setup function
+        code += '''
+void setup() {
   Serial.begin(9600);
   
   // Attach servos
-  for(int i = 0; i < 8; i++) {{
+  for(int i = 0; i < 8; i++) {
     servo[i].attach(servoPins[i]);
-    servo[i].write(90); // Center position
-  }}
+    servo[i].write(90);
+  }
   
   delay(1000);
-  Serial.println("8-Servo Hand Control Ready");
-}}
+  Serial.println("8-Servo Hand Control Ready - Simultaneous Playback");
+  loopStartTime = millis();
+}
 
-void loop() {{
-  Serial.println("Playing recorded sequence...");
+void loop() {
+  unsigned long elapsed = millis() - loopStartTime;
+  
+  // Smooth loop blending - last 10% of loop blends back to start
+  unsigned long blendZone = loopDuration / 10;  // 10% blend zone
+  bool isBlending = elapsed >= (loopDuration - blendZone);
+  float blendFactor = 0.0;
+  
+  if(isBlending) {
+    blendFactor = (float)(elapsed - (loopDuration - blendZone)) / (float)blendZone;
+    blendFactor = constrain(blendFactor, 0.0, 1.0);
+  }
+  
+  // Loop the sequence
+  if(elapsed >= loopDuration) {
+    loopStartTime = millis();
+    elapsed = 0;
+'''
+        
+        # Reset all layer indices
+        for i in range(len(all_layer_keyframes)):
+            code += f"    layer{i+1}_index = 0;\n"
+        
+        code += "  }\n\n"
+        
+        # Update each layer
+        for i in range(len(all_layer_keyframes)):
+            layer_keyframes = all_layer_keyframes[i]['keyframes']
+            
+            # Check which servos are used in this layer
+            used_servos = []
+            for servo_idx in range(8):
+                has_data = False
+                for kf in layer_keyframes:
+                    if servo_idx < 5:
+                        pos = kf['finger_positions'][servo_idx]
+                    else:
+                        pos = kf['arm_positions'][servo_idx - 5]
+                    if pos is not None:
+                        has_data = True
+                        break
+                if has_data:
+                    used_servos.append(servo_idx)
+            
+            code += f'''  // Update layer {i+1} with interpolation
+  if(layer{i+1}_index < layer{i+1}_count - 1) {{
+    unsigned long currentTime = pgm_read_dword(&layer{i+1}_times[layer{i+1}_index]);
+    unsigned long nextTime = pgm_read_dword(&layer{i+1}_times[layer{i+1}_index + 1]);
+    
+    // Move to next keyframe if we've passed it
+    if(elapsed >= nextTime) {{
+      layer{i+1}_index++;
+    }}
+    
+    // Interpolate between current and next keyframe
+    if(layer{i+1}_index < layer{i+1}_count - 1 && elapsed >= currentTime) {{
+      currentTime = pgm_read_dword(&layer{i+1}_times[layer{i+1}_index]);
+      nextTime = pgm_read_dword(&layer{i+1}_times[layer{i+1}_index + 1]);
+      
+      // Calculate interpolation factor (0.0 to 1.0)
+      float factor = (float)(elapsed - currentTime) / (float)(nextTime - currentTime);
+      factor = constrain(factor, 0.0, 1.0);
+      
+'''
+            for servo_idx in used_servos:
+                servo_name = self.finger_names[servo_idx] if servo_idx < 5 else self.arm_names[servo_idx - 5]
+                code += f"      // Interpolate {servo_name}\n"
+                code += f"      int curr{servo_idx} = pgm_read_word(&layer{i+1}_servo{servo_idx}[layer{i+1}_index]);\n"
+                code += f"      int next{servo_idx} = pgm_read_word(&layer{i+1}_servo{servo_idx}[layer{i+1}_index + 1]);\n"
+                code += f"      int start{servo_idx} = pgm_read_word(&layer{i+1}_servo{servo_idx}[0]);\n"
+                code += f"      \n"
+                code += f"      if(curr{servo_idx} != -1 && next{servo_idx} != -1) {{\n"
+                code += f"        int interpolated = curr{servo_idx} + (int)((next{servo_idx} - curr{servo_idx}) * factor);\n"
+                code += f"        \n"
+                code += f"        // Apply blend zone for smooth looping\n"
+                code += f"        if(isBlending && start{servo_idx} != -1) {{\n"
+                code += f"          interpolated = interpolated * (1.0 - blendFactor) + start{servo_idx} * blendFactor;\n"
+                code += f"        }}\n"
+                code += f"        \n"
+                code += f"        servo[{servo_idx}].write(interpolated);\n"
+                code += f"      }} else if(curr{servo_idx} != -1) {{\n"
+                code += f"        int pos = curr{servo_idx};\n"
+                code += f"        \n"
+                code += f"        // Apply blend zone for smooth looping\n"
+                code += f"        if(isBlending && start{servo_idx} != -1) {{\n"
+                code += f"          pos = pos * (1.0 - blendFactor) + start{servo_idx} * blendFactor;\n"
+                code += f"        }}\n"
+                code += f"        \n"
+                code += f"        servo[{servo_idx}].write(pos);\n"
+                code += f"      }}\n"
+            
+            code += "    }\n  }\n\n"
+        
+        code += "  delay(5); // 200Hz update rate for smooth interpolation\n}\n"
+        
+        return code
+    
+    def export_markov_arduino(self):
+        """Export Arduino code with Markov chain phrase transitions and PIR sensor support."""
+        if not self.recorded_layers:
+            tkinter.messagebox.showwarning("No Layers", "No layers recorded yet. Record some movements first!")
+            return
+        
+        # Create configuration dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Markov Chain Export Configuration")
+        dialog.geometry("500x400")
+        dialog.configure(bg=self.colors['bg_main'])
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # PIR Sensor settings
+        pir_frame = tk.LabelFrame(dialog, text="PIR Motion Sensor", 
+                                 bg=self.colors['bg_frame'], fg=self.colors['text_main'])
+        pir_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        tk.Label(pir_frame, text="Enable PIR Sensor:", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_main']).grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        pir_enable = tk.BooleanVar(value=True)
+        tk.Checkbutton(pir_frame, variable=pir_enable, bg=self.colors['bg_frame']).grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        tk.Label(pir_frame, text="PIR Pin:", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_main']).grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        pir_pin = tk.IntVar(value=2)
+        tk.Spinbox(pir_frame, from_=2, to=13, textvariable=pir_pin, width=10).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        tk.Label(pir_frame, text="Motion Timeout (seconds):", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_main']).grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+        motion_timeout = tk.IntVar(value=5)
+        tk.Spinbox(pir_frame, from_=1, to=60, textvariable=motion_timeout, width=10).grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        # Phrase library settings
+        phrase_frame = tk.LabelFrame(dialog, text="Phrase Library", 
+                                     bg=self.colors['bg_frame'], fg=self.colors['text_main'])
+        phrase_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        tk.Label(phrase_frame, text="Current recording will be exported as 1 phrase.\nLoad more .json recordings to add phrases:", 
+                bg=self.colors['bg_frame'], fg=self.colors['text_main'], justify=tk.LEFT).pack(pady=5)
+        
+        phrase_listbox = tk.Listbox(phrase_frame, height=6, bg=self.colors['bg_dark'], fg=self.colors['text_main'])
+        phrase_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        phrase_listbox.insert(tk.END, "Phrase 1: Current Recording")
+        
+        phrase_files = []
+        
+        def add_phrase():
+            filename = tkinter.filedialog.askopenfilename(
+                title="Load Additional Phrase",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            )
+            if filename:
+                phrase_files.append(filename)
+                phrase_listbox.insert(tk.END, f"Phrase {len(phrase_files) + 1}: {os.path.basename(filename)}")
+        
+        tk.Button(phrase_frame, text="➕ Add Phrase from File", command=add_phrase,
+                 bg=self.colors['button_bg']).pack(pady=5)
+        
+        # Export button
+        def do_export():
+            dialog.destroy()
+            code = self.generate_markov_arduino_code(
+                pir_enabled=pir_enable.get(),
+                pir_pin=pir_pin.get(),
+                motion_timeout=motion_timeout.get(),
+                additional_phrase_files=phrase_files
+            )
+            
+            # Save to file
+            filename = f"hand_markov_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.ino"
+            filepath = os.path.join(os.getcwd(), filename)
+            
+            try:
+                with open(filepath, 'w') as f:
+                    f.write(code)
+                
+                tkinter.messagebox.showinfo("Markov Export Successful", 
+                                          f"Arduino code with Markov chain exported to:\n{filepath}\n\n" +
+                                          f"Phrases: {len(phrase_files) + 1}\n" +
+                                          f"PIR Sensor: {'Enabled' if pir_enable.get() else 'Disabled'}")
+                print(f"🎲 Markov Arduino code exported to {filepath}")
+                
+            except Exception as e:
+                tkinter.messagebox.showerror("Export Failed", f"Failed to export Arduino code:\n{e}")
+        
+        button_frame = tk.Frame(dialog, bg=self.colors['bg_main'])
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        tk.Button(button_frame, text="✅ Export", command=do_export,
+                 bg=self.colors['button_bg'], font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="❌ Cancel", command=dialog.destroy,
+                 bg=self.colors['button_bg']).pack(side=tk.LEFT, padx=5)
+    
+    def generate_markov_arduino_code(self, pir_enabled=True, pir_pin=2, motion_timeout=5, additional_phrase_files=None):
+        """Generate Arduino code with Markov chain transitions between phrases."""
+        if additional_phrase_files is None:
+            additional_phrase_files = []
+        
+        # Collect all phrases (current recording + loaded files)
+        phrases = []
+        
+        # Add current recording as first phrase
+        phrases.append({
+            'name': 'Current Recording',
+            'layers': self.recorded_layers,
+            'loop_duration': self.loop_duration.get() if self.loop_duration.get() > 0 else max(layer['duration'] for layer in self.recorded_layers)
+        })
+        
+        # Load additional phrases from files
+        for filepath in additional_phrase_files:
+            try:
+                with open(filepath, 'r') as f:
+                    save_data = json.load(f)
+                    loaded_layers = save_data.get('layers', [])
+                    # Convert recorded_servos lists back to sets
+                    for layer in loaded_layers:
+                        if 'recorded_servos' in layer:
+                            layer['recorded_servos'] = {
+                                'fingers': set(layer['recorded_servos'].get('fingers', [])),
+                                'arm': set(layer['recorded_servos'].get('arm', []))
+                            }
+                    phrases.append({
+                        'name': os.path.basename(filepath),
+                        'layers': loaded_layers,
+                        'loop_duration': save_data.get('loop_duration', max(layer['duration'] for layer in loaded_layers) if loaded_layers else 1.0)
+                    })
+            except Exception as e:
+                print(f"❌ Failed to load phrase from {filepath}: {e}")
+        
+        num_phrases = len(phrases)
+        
+        # Build simple uniform transition matrix (each phrase can transition to any other with equal probability)
+        # In the future, this could analyze temporal patterns to build smarter transitions
+        
+        code = f'''/*
+ * 8-Servo Hand Control - Markov Chain Phrase System
+ * Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+ * Phrases: {num_phrases}
+ * PIR Sensor: {"Enabled on pin " + str(pir_pin) if pir_enabled else "Disabled"}
+ * 
+ * This sketch uses Markov chains to randomly transition between
+ * recorded movement phrases, creating organic, non-repetitive behavior.
+ * 
+ * Hardware: 5 Finger Servos + 3 Arm Servos
+ * Pin Mapping (reversed order):
+ * Pin 12 -> Thumb (servo 0)
+ * Pin 11 -> Index (servo 1)
+ * Pin 10 -> Middle (servo 2)
+ * Pin 9  -> Ring (servo 3)
+ * Pin 8  -> Pinky (servo 4)
+ * Pin 7  -> Shoulder (servo 5)
+ * Pin 6  -> Elbow (servo 6)
+ * Pin 5  -> Wrist (servo 7)
+ */
+
+#include <Servo.h>
+
+// Servo objects
+Servo servo[8];
+int servoPins[8] = {{12, 11, 10, 9, 8, 7, 6, 5}};
+
+// PIR Motion Sensor
+'''
+        
+        if pir_enabled:
+            code += f'''const int PIR_PIN = {pir_pin};
+const unsigned long MOTION_TIMEOUT = {motion_timeout * 1000}; // milliseconds
+bool motionDetected = false;
+unsigned long lastMotionTime = 0;
+'''
+        
+        code += f'''
+// Phrase system
+const int NUM_PHRASES = {num_phrases};
+int currentPhrase = 0;
+unsigned long phraseStartTime = 0;
+
+// Transition probability matrix (stored as percentages 0-100)
+// Each row represents probabilities of transitioning FROM that phrase TO others
+const uint8_t transitionMatrix[NUM_PHRASES][NUM_PHRASES] PROGMEM = {{
+'''
+        
+        # Generate uniform transition matrix (equal probability to all other phrases)
+        for i in range(num_phrases):
+            code += "  {"
+            probs = []
+            for j in range(num_phrases):
+                if i == j:
+                    probs.append("10")  # 10% chance to repeat same phrase
+                else:
+                    # Equal probability for other phrases
+                    prob = int(90 / (num_phrases - 1)) if num_phrases > 1 else 0
+                    probs.append(str(prob))
+            code += ", ".join(probs)
+            code += "}," if i < num_phrases - 1 else "}"
+            code += f" // From Phrase {i}\n"
+        
+        code += "};\n\n"
+        
+        # Generate keyframe data for each phrase
+        for phrase_idx, phrase in enumerate(phrases):
+            code += f"// ===== PHRASE {phrase_idx}: {phrase['name']} =====\n"
+            
+            max_duration = phrase['loop_duration']
+            
+            # Extract keyframes for all layers WITH TIME NORMALIZATION
+            all_layer_keyframes = []
+            for layer in phrase['layers']:
+                movements = sorted(layer['data'], key=lambda x: x['time'])
+                keyframes = self._extract_keyframes(movements)
+                
+                # TIME NORMALIZE
+                layer_duration = layer['duration']
+                if layer_duration > 0 and max_duration > 0:
+                    time_scale = max_duration / layer_duration
+                    for kf in keyframes:
+                        kf['time'] = kf['time'] * time_scale
+                
+                all_layer_keyframes.append({
+                    'name': layer['name'],
+                    'keyframes': keyframes
+                })
+            
+            code += f"const unsigned long phrase{phrase_idx}_duration = {int(max_duration * 1000)};\n"
+            
+            # Generate layer data structures
+            for layer_idx, layer_data in enumerate(all_layer_keyframes):
+                keyframes = layer_data['keyframes']
+                code += f"const int phrase{phrase_idx}_layer{layer_idx}_count = {len(keyframes)};\n"
+                code += f"const unsigned long phrase{phrase_idx}_layer{layer_idx}_times[] PROGMEM = {{"
+                code += ', '.join([str(int(kf['time'] * 1000)) for kf in keyframes])
+                code += "};\n"
+                
+                # Generate position arrays for each servo (only if used)
+                for servo_idx in range(8):
+                    has_data = False
+                    for kf in keyframes:
+                        if servo_idx < 5:
+                            pos = kf['finger_positions'][servo_idx]
+                        else:
+                            pos = kf['arm_positions'][servo_idx - 5]
+                        if pos is not None:
+                            has_data = True
+                            break
+                    
+                    if has_data:
+                        code += f"const int phrase{phrase_idx}_layer{layer_idx}_servo{servo_idx}[] PROGMEM = {{"
+                        positions = []
+                        for kf in keyframes:
+                            if servo_idx < 5:
+                                pos = kf['finger_positions'][servo_idx]
+                            else:
+                                pos = kf['arm_positions'][servo_idx - 5]
+                            positions.append(str(int(pos)) if pos is not None else "-1")
+                        code += ', '.join(positions)
+                        code += "};\n"
+            
+            code += f"int phrase{phrase_idx}_layer_indices[{len(all_layer_keyframes)}];\n\n"
+        
+        # Setup function
+        code += '''void setup() {
+  Serial.begin(9600);
+  
+  // Attach servos
+  for(int i = 0; i < 8; i++) {
+    servo[i].attach(servoPins[i]);
+    servo[i].write(90);
+  }
   
 '''
         
-        # Add each layer as a function call
-        for i, layer in enumerate(self.recorded_layers):
-            code += f"  playLayer{i+1}(); // {layer['name']} ({layer['control_mode']} mode)\n"
-            code += f"  delay(2000); // Pause between layers\n\n"
+        if pir_enabled:
+            code += f'''  // Setup PIR sensor
+  pinMode(PIR_PIN, INPUT);
+  Serial.println("PIR Motion Sensor enabled on pin {pir_pin}");
+  
+'''
         
-        code += "}\n\n"
+        code += '''  delay(1000);
+  randomSeed(analogRead(A0)); // Seed random from floating analog pin
+  Serial.println("Markov Chain Hand Control Ready");
+  Serial.print("Phrases loaded: ");
+  Serial.println(NUM_PHRASES);
+  
+  phraseStartTime = millis();
+}
+
+'''
         
-        # Generate individual layer functions
-        for i, layer in enumerate(self.recorded_layers):
-            code += f"// Layer {i+1}: {layer['name']} - {layer['control_mode']} mode\n"
-            code += f"// Duration: {layer['duration']:.1f}s, Points: {len(layer['data'])}\n"
-            code += f"void playLayer{i+1}() {{\n"
+        # Helper function to select next phrase based on Markov probabilities
+        code += '''int selectNextPhrase(int currentPhrase) {
+  // Read transition probabilities for current phrase from PROGMEM
+  int randVal = random(100); // 0-99
+  int cumulative = 0;
+  
+  for(int i = 0; i < NUM_PHRASES; i++) {
+    cumulative += pgm_read_byte(&transitionMatrix[currentPhrase][i]);
+    if(randVal < cumulative) {
+      return i;
+    }
+  }
+  
+  return 0; // Fallback
+}
+
+'''
+        
+        # Main loop with phrase playback and transitions
+        code += '''void loop() {
+'''
+        
+        if pir_enabled:
+            code += '''  // Check PIR sensor
+  if(digitalRead(PIR_PIN) == HIGH) {
+    motionDetected = true;
+    lastMotionTime = millis();
+  }
+  
+  // Check motion timeout
+  if(motionDetected && (millis() - lastMotionTime > MOTION_TIMEOUT)) {
+    motionDetected = false;
+    Serial.println("No motion detected - pausing");
+    // Return to center position
+    for(int i = 0; i < 8; i++) {
+      servo[i].write(90);
+    }
+    delay(100);
+    return;
+  }
+  
+  // Only play phrases if motion detected
+  if(!motionDetected) {
+    delay(100);
+    return;
+  }
+  
+'''
+        
+        code += '''  unsigned long elapsed = millis() - phraseStartTime;
+  unsigned long phraseDuration = 0;
+  
+  // Get current phrase duration
+  switch(currentPhrase) {
+'''
+        
+        for phrase_idx in range(num_phrases):
+            code += f"    case {phrase_idx}: phraseDuration = phrase{phrase_idx}_duration; break;\n"
+        
+        code += '''  }
+  
+  // Check if phrase is complete
+  if(elapsed >= phraseDuration) {
+    // Transition to next phrase using Markov chain
+    int nextPhrase = selectNextPhrase(currentPhrase);
+    
+    Serial.print("Phrase ");
+    Serial.print(currentPhrase);
+    Serial.print(" complete. Transitioning to phrase ");
+    Serial.println(nextPhrase);
+    
+    currentPhrase = nextPhrase;
+    phraseStartTime = millis();
+    elapsed = 0;
+    
+    // Reset all layer indices for new phrase
+'''
+        
+        for phrase_idx in range(num_phrases):
+            num_layers = len(phrases[phrase_idx]['layers'])
+            code += f"    if(currentPhrase == {phrase_idx}) {{ for(int i = 0; i < {num_layers}; i++) phrase{phrase_idx}_layer_indices[i] = 0; }}\n"
+        
+        code += '''  }
+  
+  // Play current phrase
+  playPhrase(currentPhrase, elapsed);
+  
+  delay(5); // 200Hz update rate
+}
+
+void playPhrase(int phraseNum, unsigned long elapsed) {
+  switch(phraseNum) {
+'''
+        
+        # Generate playback code for each phrase
+        for phrase_idx, phrase in enumerate(phrases):
+            all_layer_keyframes = []
+            for layer in phrase['layers']:
+                movements = sorted(layer['data'], key=lambda x: x['time'])
+                keyframes = self._extract_keyframes(movements)
+                
+                layer_duration = layer['duration']
+                max_duration = phrase['loop_duration']
+                if layer_duration > 0 and max_duration > 0:
+                    time_scale = max_duration / layer_duration
+                    for kf in keyframes:
+                        kf['time'] = kf['time'] * time_scale
+                
+                all_layer_keyframes.append(keyframes)
             
-            # Sort movements by time
-            movements = sorted(layer['data'], key=lambda x: x['time'])
+            code += f"    case {phrase_idx}:\n"
+            code += f"      playPhrase{phrase_idx}(elapsed);\n"
+            code += f"      break;\n"
+        
+        code += '''  }
+}
+
+'''
+        
+        # Generate individual phrase playback functions
+        for phrase_idx, phrase in enumerate(phrases):
+            all_layer_keyframes = []
+            for layer in phrase['layers']:
+                movements = sorted(layer['data'], key=lambda x: x['time'])
+                keyframes = self._extract_keyframes(movements)
+                
+                layer_duration = layer['duration']
+                max_duration = phrase['loop_duration']
+                if layer_duration > 0 and max_duration > 0:
+                    time_scale = max_duration / layer_duration
+                    for kf in keyframes:
+                        kf['time'] = kf['time'] * time_scale
+                
+                all_layer_keyframes.append({
+                    'keyframes': keyframes
+                })
             
-            last_time = 0
-            for j, movement in enumerate(movements):
-                # Add delay if needed
-                if movement['time'] > last_time:
-                    delay_ms = int((movement['time'] - last_time) * 1000)
-                    if delay_ms > 10:  # Only add significant delays
-                        code += f"  delay({delay_ms});\n"
+            code += f"void playPhrase{phrase_idx}(unsigned long elapsed) {{\n"
+            code += f"  unsigned long blendZone = phrase{phrase_idx}_duration / 10;\n"
+            code += f"  bool isBlending = elapsed >= (phrase{phrase_idx}_duration - blendZone);\n"
+            code += f"  float blendFactor = isBlending ? (float)(elapsed - (phrase{phrase_idx}_duration - blendZone)) / blendZone : 0;\n\n"
+            
+            # Generate layer playback code
+            for layer_idx, layer_data in enumerate(all_layer_keyframes):
+                keyframes = layer_data['keyframes']
+                code += f"  // Layer {layer_idx}\n"
+                code += f"  if(phrase{phrase_idx}_layer_indices[{layer_idx}] < phrase{phrase_idx}_layer{layer_idx}_count - 1) {{\n"
+                code += f"    unsigned long currentTime = pgm_read_dword(&phrase{phrase_idx}_layer{layer_idx}_times[phrase{phrase_idx}_layer_indices[{layer_idx}]]);\n"
+                code += f"    unsigned long nextTime = pgm_read_dword(&phrase{phrase_idx}_layer{layer_idx}_times[phrase{phrase_idx}_layer_indices[{layer_idx}] + 1]);\n"
+                code += f"    \n"
+                code += f"    if(elapsed >= nextTime) {{\n"
+                code += f"      phrase{phrase_idx}_layer_indices[{layer_idx}]++;\n"
+                code += f"    }}\n"
+                code += f"    \n"
+                code += f"    float factor = (elapsed >= currentTime && nextTime > currentTime) ? (float)(elapsed - currentTime) / (nextTime - currentTime) : 0;\n"
+                code += f"    if(factor > 1.0) factor = 1.0;\n\n"
                 
-                # Add servo movements
-                finger_pos = movement['finger_positions']
-                arm_pos = movement['arm_positions']
+                # Check which servos are used in this layer
+                used_servos = set()
+                for kf in keyframes:
+                    for servo_idx in range(8):
+                        if servo_idx < 5:
+                            pos = kf['finger_positions'][servo_idx]
+                        else:
+                            pos = kf['arm_positions'][servo_idx - 5]
+                        if pos is not None:
+                            used_servos.add(servo_idx)
                 
-                # Comment with readable positions
-                code += f"  // Step {j+1}: Fingers [{', '.join([f'{int(p)}' for p in finger_pos])}] Arm [{', '.join([f'{int(p)}' for p in arm_pos])}]\n"
+                # Generate interpolation code for each used servo
+                for servo_idx in sorted(used_servos):
+                    code += f"    // Servo {servo_idx}\n"
+                    code += f"    int curr{servo_idx} = pgm_read_word(&phrase{phrase_idx}_layer{layer_idx}_servo{servo_idx}[phrase{phrase_idx}_layer_indices[{layer_idx}]]);\n"
+                    code += f"    int next{servo_idx} = pgm_read_word(&phrase{phrase_idx}_layer{layer_idx}_servo{servo_idx}[phrase{phrase_idx}_layer_indices[{layer_idx}] + 1]);\n"
+                    code += f"    int start{servo_idx} = pgm_read_word(&phrase{phrase_idx}_layer{layer_idx}_servo{servo_idx}[0]);\n"
+                    code += f"    if(curr{servo_idx} != -1 && next{servo_idx} != -1) {{\n"
+                    code += f"      int interpolated = curr{servo_idx} + (int)((next{servo_idx} - curr{servo_idx}) * factor);\n"
+                    code += f"      if(isBlending && start{servo_idx} != -1) {{\n"
+                    code += f"        interpolated = interpolated * (1.0 - blendFactor) + start{servo_idx} * blendFactor;\n"
+                    code += f"      }}\n"
+                    code += f"      servo[{servo_idx}].write(interpolated);\n"
+                    code += f"    }}\n\n"
                 
-                # Set finger servos
-                for k, pos in enumerate(finger_pos):
-                    code += f"  servo[{k}].write({int(pos)}); // {self.finger_names[k]}\n"
-                
-                # Set arm servos
-                for k, pos in enumerate(arm_pos):
-                    code += f"  servo[{k+5}].write({int(pos)}); // {self.arm_names[k]}\n"
-                
-                code += "\n"
-                last_time = movement['time']
+                code += f"  }}\n\n"
             
             code += "}\n\n"
         
-        # Add utility functions
-        code += '''// Utility Functions
-void centerAllServos() {
-  Serial.println("Centering all servos...");
-  for(int i = 0; i < 8; i++) {
-    servo[i].write(90);
-    delay(100);
-  }
-}
-
-void smoothMove(int servoIndex, int targetAngle, int steps = 20) {
-  int currentAngle = servo[servoIndex].read();
-  int stepSize = (targetAngle - currentAngle) / steps;
-  
-  for(int i = 0; i < steps; i++) {
-    servo[servoIndex].write(currentAngle + (stepSize * i));
-    delay(50);
-  }
-  servo[servoIndex].write(targetAngle);
-}
-
-// Individual servo control functions
-void setFingers(int thumb, int index, int middle, int ring, int pinky) {
-  servo[0].write(thumb);
-  servo[1].write(index);
-  servo[2].write(middle); 
-  servo[3].write(ring);
-  servo[4].write(pinky);
-}
-
-void setArm(int wristRotate, int wristTilt, int elbow) {
-  servo[5].write(wristRotate);
-  servo[6].write(wristTilt);
-  servo[7].write(elbow);
-}
-'''
-        
         return code
+
+    def _extract_keyframes(self, movements, threshold=5.0):
+        """Extract keyframes from movement data based on significant position changes.
+        
+        Uses adaptive threshold and time decimation to aggressively compress cursor movements
+        while preserving manual positioning precision.
+        
+        Args:
+            movements: List of movement dictionaries with time and positions
+            threshold: Minimum angle change (degrees) to create a keyframe
+            
+        Returns:
+            List of keyframe movements with significant changes
+        """
+        if not movements:
+            return []
+        
+        # Adaptive threshold and time decimation based on control mode
+        control_mode = movements[0].get('control_mode', 'cursor')
+        if control_mode == 'cursor':
+            threshold = 5.0  # Reduced from 10° for smoother cursor movements
+            min_time_delta = 0.1  # Reduced from 200ms to 100ms for higher resolution
+        else:
+            threshold = 3.0  # Reduced from 4° for smoother manual positioning
+            min_time_delta = 0.05  # Keep at 50ms for manual
+        
+        keyframes = [movements[0]]  # Always include first frame
+        last_keyframe = movements[0]
+        last_keyframe_time = movements[0]['time']
+        
+        for movement in movements[1:]:
+            # Time-based decimation: enforce minimum time between keyframes
+            time_delta = movement['time'] - last_keyframe_time
+            if time_delta < min_time_delta:
+                continue  # Skip - too soon after last keyframe
+            
+            # Check if any servo has changed significantly
+            is_keyframe = False
+            max_change = 0.0
+            
+            # Check finger positions
+            for i in range(len(movement['finger_positions'])):
+                curr_pos = movement['finger_positions'][i]
+                last_pos = last_keyframe['finger_positions'][i]
+                
+                # Only compare if both are not None
+                if curr_pos is not None and last_pos is not None:
+                    change = abs(curr_pos - last_pos)
+                    max_change = max(max_change, change)
+                    if change >= threshold:
+                        is_keyframe = True
+                        break
+                elif curr_pos is not None or last_pos is not None:
+                    # One changed from/to None - that's a keyframe
+                    is_keyframe = True
+                    break
+            
+            # Check arm positions if not already a keyframe
+            if not is_keyframe:
+                for i in range(len(movement['arm_positions'])):
+                    curr_pos = movement['arm_positions'][i]
+                    last_pos = last_keyframe['arm_positions'][i]
+                    
+                    if curr_pos is not None and last_pos is not None:
+                        change = abs(curr_pos - last_pos)
+                        max_change = max(max_change, change)
+                        if change >= threshold:
+                            is_keyframe = True
+                            break
+                    elif curr_pos is not None or last_pos is not None:
+                        is_keyframe = True
+                        break
+            
+            if is_keyframe:
+                keyframes.append(movement)
+                last_keyframe = movement
+                last_keyframe_time = movement['time']
+        
+        # Always include last frame to complete the motion
+        if movements[-1] != keyframes[-1]:
+            keyframes.append(movements[-1])
+        
+        reduction = 100*(1-len(keyframes)/len(movements)) if len(movements) > 0 else 0
+        print(f"  🔍 Keyframe extraction ({control_mode} mode, {threshold}° threshold, {min_time_delta*1000:.0f}ms min): {len(movements)} frames → {len(keyframes)} keyframes ({reduction:.1f}% reduction)")
+        
+        return keyframes
     
     def create_visual_feedback(self):
         """Create visual feedback elements on the canvas."""
