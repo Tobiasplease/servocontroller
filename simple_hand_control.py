@@ -15,6 +15,7 @@ import tkinter as tk
 from tkinter import ttk
 import tkinter.messagebox
 import tkinter.simpledialog
+import customtkinter as ctk
 import time
 import math
 import os
@@ -37,23 +38,33 @@ class SimpleHandControl:
     """Simple 8-servo hand control with cursor wave control and Arduino export."""
     
     def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("Simple 8-Servo Hand Control")
+        # Set CustomTkinter appearance - Dark 98 / Lain aesthetic
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("dark-blue")
+        
+        self.root = ctk.CTk()
+        self.root.title("SERVO CONTROL INTERFACE v1.0")
         self.root.geometry("1380x940")
         self.root.minsize(1200, 820)
         
-        # Color scheme
+        # Dark 98 / Serial Experiments Lain color scheme
         self.colors = {
-            'bg_main': '#FEF7F7',
-            'bg_frame': '#F8E8E8',
-            'bg_dark': '#E0D0E0',
-            'text_main': '#5D4E75',
-            'text_dim': '#9B8BA8',
-            'button_bg': '#E8C5E8',
-            'canvas_bg': '#FFFEF8'
+            'bg_main': '#1a1a2e',      # Deep navy background
+            'bg_frame': '#16213e',     # Slightly lighter frame bg
+            'bg_dark': '#0f0f1a',      # Darkest elements
+            'text_main': '#00ff41',    # Phosphor green (Lain terminal)
+            'text_dim': '#4a9f4a',     # Dimmed green
+            'text_cyan': '#00d4ff',    # Cyan accent
+            'button_bg': '#2d2d44',    # Dark gray button (beveled look)
+            'button_hover': '#3d3d5c', # Button hover
+            'button_active': '#00ff41', # Active/recording state
+            'canvas_bg': '#0a0a12',    # Near-black canvas
+            'accent_red': '#ff3366',   # Recording/alert red
+            'accent_cyan': '#00d4ff',  # Cyan highlights
+            'border': '#333355'        # Subtle border color
         }
-        
-        self.root.configure(bg=self.colors['bg_main'])
+        # Default CTkButton color
+        self.default_button_color = '#2d2d44'
         
         # Servo configuration
         self.num_fingers = 5
@@ -243,48 +254,48 @@ class SimpleHandControl:
         record_controls = tk.Frame(top_bar, bg=self.colors['bg_main'])
         record_controls.pack(side=tk.RIGHT)
         
-        self.record_btn = tk.Button(record_controls, text="🔴 Record", 
+        self.record_btn = ctk.CTkButton(record_controls, text="🔴 Record", 
                                    command=self.toggle_recording,
-                                   bg=self.colors['button_bg'], font=('Arial', 9, 'bold'))
+                                   font=('Arial', 12, 'bold'), width=100)
         self.record_btn.pack(side=tk.LEFT, padx=2)
         
-        self.playback_btn = tk.Button(record_controls, text="▶️ Play", 
+        self.playback_btn = ctk.CTkButton(record_controls, text="▶️ Play", 
                                      command=self.toggle_playback,
-                                     bg=self.colors['button_bg'], font=('Arial', 9, 'bold'))
+                                     font=('Arial', 12, 'bold'), width=100)
         self.playback_btn.pack(side=tk.LEFT, padx=2)
         
-        self.markov_btn = tk.Button(record_controls, text="🎲 Organic", 
+        self.markov_btn = ctk.CTkButton(record_controls, text="🎲 Organic", 
                                     command=self.toggle_markov_playback,
-                                    bg=self.colors['button_bg'], font=('Arial', 9, 'bold'))
+                                    font=('Arial', 12, 'bold'), width=100)
         self.markov_btn.pack(side=tk.LEFT, padx=2)
         
-        tk.Button(record_controls, text="📸 Capture", 
+        ctk.CTkButton(record_controls, text="📸 Capture", 
                  command=self.capture_keyframe,
-                 bg=self.colors['button_bg'], font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+                 font=('Arial', 11), width=80).pack(side=tk.LEFT, padx=2)
         
-        tk.Button(record_controls, text="💾 Save", 
+        ctk.CTkButton(record_controls, text="💾 Save", 
                  command=self.save_recording,
-                 bg=self.colors['button_bg'], font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+                 font=('Arial', 11), width=70).pack(side=tk.LEFT, padx=2)
         
-        tk.Button(record_controls, text="📂 Load", 
+        ctk.CTkButton(record_controls, text="📂 Load", 
                  command=self.load_recording,
-                 bg=self.colors['button_bg'], font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+                 font=('Arial', 11), width=70).pack(side=tk.LEFT, padx=2)
         
-        tk.Button(record_controls, text="📤 Export", 
+        ctk.CTkButton(record_controls, text="📤 Export", 
                  command=self.export_arduino_code,
-                 bg=self.colors['button_bg'], font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+                 font=('Arial', 11), width=80).pack(side=tk.LEFT, padx=2)
         
-        tk.Button(record_controls, text="🎲 Markov Export", 
+        ctk.CTkButton(record_controls, text="🎲 Markov Export", 
                  command=self.export_markov_arduino,
-                 bg=self.colors['button_bg'], font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+                 font=('Arial', 11), width=110).pack(side=tk.LEFT, padx=2)
         
-        tk.Button(record_controls, text="🔌 Connect", 
+        ctk.CTkButton(record_controls, text="🔌 Connect", 
                  command=self.reconnect_arduino,
-                 bg=self.colors['button_bg'], font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+                 font=('Arial', 11), width=90).pack(side=tk.LEFT, padx=2)
         
-        tk.Button(record_controls, text="🗑️", 
+        ctk.CTkButton(record_controls, text="🗑️", 
                  command=self.clear_layers,
-                 bg=self.colors['button_bg'], font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+                 font=('Arial', 11), width=40).pack(side=tk.LEFT, padx=2)
         
         # Status bar
         status_bar = tk.Frame(main_frame, bg=self.colors['bg_dark'], relief=tk.SUNKEN, bd=1)
@@ -325,12 +336,12 @@ class SimpleHandControl:
         self.variation_container.pack(fill=tk.X, pady=(0, 5))
         
         self.variation_expanded = True
-        self.variation_btn = tk.Button(self.variation_container, 
+        self.variation_btn = ctk.CTkButton(self.variation_container, 
                                        text="▼ Organic Variations", 
                                        command=self.toggle_variation_panel,
-                                       bg=self.colors['button_bg'], fg=self.colors['text_main'],
-                                       font=('Arial', 9, 'bold'), anchor='w', 
-                                       relief=tk.FLAT, cursor="hand2")
+                                       fg_color="transparent", text_color=self.colors['text_main'],
+                                       font=('Arial', 11, 'bold'), anchor='w',
+                                       hover_color='#E0E0E0')
         self.variation_btn.pack(fill=tk.X, pady=(0, 2))
         
         self.variation_content = tk.Frame(self.variation_container, bg=self.colors['bg_frame'],
@@ -394,12 +405,12 @@ class SimpleHandControl:
         
         # Clickable header button
         self.hw_config_expanded = False
-        self.hw_config_btn = tk.Button(self.hw_config_container, 
+        self.hw_config_btn = ctk.CTkButton(self.hw_config_container, 
                                        text="▶ Hardware Config", 
                                        command=self.toggle_hw_config_panel,
-                                       bg=self.colors['button_bg'], fg=self.colors['text_main'],
-                                       font=('Arial', 9, 'bold'), anchor='w', 
-                                       relief=tk.FLAT, cursor="hand2")
+                                       fg_color="transparent", text_color=self.colors['text_main'],
+                                       font=('Arial', 11, 'bold'), anchor='w',
+                                       hover_color='#E0E0E0')
         self.hw_config_btn.pack(fill=tk.X, pady=(0, 2))
         
         # Content frame (starts hidden)
@@ -414,10 +425,10 @@ class SimpleHandControl:
                 fg=self.colors['text_main'], font=('Arial', 8), width=12, anchor='w').pack(side=tk.LEFT)
         self.config_name_var = tk.StringVar(value=self.hardware_config['name'])
         tk.Entry(name_row, textvariable=self.config_name_var, width=20, font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
-        tk.Button(name_row, text="📥 Import", command=self.import_hardware_preset,
-                 bg=self.colors['button_bg'], font=('Arial', 7)).pack(side=tk.LEFT, padx=2)
-        tk.Button(name_row, text="📤 Export", command=self.export_hardware_preset,
-                 bg=self.colors['button_bg'], font=('Arial', 7)).pack(side=tk.LEFT, padx=2)
+        ctk.CTkButton(name_row, text="📥 Import", command=self.import_hardware_preset,
+                 font=('Arial', 10), width=70).pack(side=tk.LEFT, padx=2)
+        ctk.CTkButton(name_row, text="📤 Export", command=self.export_hardware_preset,
+                 font=('Arial', 10), width=70).pack(side=tk.LEFT, padx=2)
         
         # Serial port
         port_row = tk.Frame(self.hw_config_content, bg=self.colors['bg_frame'])
@@ -457,8 +468,8 @@ class SimpleHandControl:
         # Apply and Save buttons
         btn_row = tk.Frame(self.hw_config_content, bg=self.colors['bg_frame'])
         btn_row.pack(fill=tk.X, padx=5, pady=5)
-        tk.Button(btn_row, text="✅ Apply & Save", command=self.apply_and_save_config,
-                 bg=self.colors['button_bg'], font=('Arial', 8, 'bold')).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_row, text="✅ Apply & Save", command=self.apply_and_save_config,
+                 font=('Arial', 11, 'bold'), width=120).pack(side=tk.LEFT, padx=5)
         tk.Label(btn_row, text="(Affects .ino exports)", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_dim'], font=('Arial', 7)).pack(side=tk.LEFT)
         
@@ -488,10 +499,10 @@ class SimpleHandControl:
         self.pir_state_label.pack(side=tk.LEFT)
         
         # Simulate motion button
-        self.pir_simulate_btn = tk.Button(pir_top_row, text="👋 Simulate Motion", 
+        self.pir_simulate_btn = ctk.CTkButton(pir_top_row, text="👋 Simulate Motion", 
                                          command=self.simulate_pir_motion,
-                                         bg='#FFB366', font=('Arial', 9, 'bold'),
-                                         state=tk.DISABLED)
+                                         fg_color='#FFB366', font=('Arial', 11, 'bold'),
+                                         state='disabled', width=130)
         self.pir_simulate_btn.pack(side=tk.LEFT, padx=(20, 5))
         
         # Timer display
@@ -501,10 +512,18 @@ class SimpleHandControl:
         self.pir_timer_label.pack(side=tk.LEFT, padx=10)
         
         # Save to Library button (saves current recording for PIR states)
-        self.pir_save_btn = tk.Button(pir_top_row, text="📚 Save to Library", 
+        self.pir_save_btn = ctk.CTkButton(pir_top_row, text="📚 Save to Library", 
                                       command=self.save_to_pir_library,
-                                      bg='#99CCFF', font=('Arial', 9, 'bold'))
+                                      fg_color='#99CCFF', font=('Arial', 11, 'bold'),
+                                      width=130)
         self.pir_save_btn.pack(side=tk.RIGHT, padx=5)
+        
+        # Export PIR State Machine to Arduino
+        self.pir_export_btn = ctk.CTkButton(pir_top_row, text="📤 Export to .ino", 
+                                      command=self.export_pir_state_machine,
+                                      fg_color='#66CC66', font=('Arial', 11, 'bold'),
+                                      width=130)
+        self.pir_export_btn.pack(side=tk.RIGHT, padx=5)
         
         # State assignment cards - three columns
         pir_states_frame = tk.Frame(pir_main_frame, bg='#FFE8E8')
@@ -658,8 +677,8 @@ class SimpleHandControl:
             variable=self.global_clamp_max, length=80,
             font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
 
-        tk.Button(param_frame1, text="Apply Clamp to All", command=self.apply_global_clamp_to_all,
-             bg=self.colors['button_bg'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(5, 0))
+        ctk.CTkButton(param_frame1, text="Apply Clamp to All", command=self.apply_global_clamp_to_all,
+             font=('Arial', 10), width=130).pack(side=tk.LEFT, padx=(5, 0))
         
         # Cursor control parameters - Row 2
         param_frame2 = tk.Frame(self.cursor_frame, bg=self.colors['bg_frame'])
@@ -713,17 +732,17 @@ class SimpleHandControl:
         self.layer_info_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
         # Keyframe control buttons
-        tk.Button(layer_bottom, text="📸→📦 Keyframes to Layer", 
+        ctk.CTkButton(layer_bottom, text="📸→📦 Keyframes to Layer", 
                  command=self.convert_keyframes_to_layer,
-                 bg=self.colors['button_bg'], font=('Arial', 8)).pack(side=tk.RIGHT, padx=2)
+                 font=('Arial', 10), width=150).pack(side=tk.RIGHT, padx=2)
         
-        tk.Button(layer_bottom, text="Clear Keyframes", 
+        ctk.CTkButton(layer_bottom, text="Clear Keyframes", 
                  command=self.clear_keyframes,
-                 bg=self.colors['button_bg'], font=('Arial', 8)).pack(side=tk.RIGHT, padx=2)
+                 font=('Arial', 10), width=110).pack(side=tk.RIGHT, padx=2)
         
-        tk.Button(layer_bottom, text="Delete Selected", 
+        ctk.CTkButton(layer_bottom, text="Delete Selected", 
                  command=self.delete_selected_layer,
-                 bg=self.colors['button_bg'], font=('Arial', 8)).pack(side=tk.RIGHT)
+                 font=('Arial', 10), width=110).pack(side=tk.RIGHT)
     
     def create_servo_sliders(self):
         """Create single-servo control interface."""
@@ -754,10 +773,10 @@ class SimpleHandControl:
         # Preset controls (global)
         preset_row = tk.Frame(self.servo_frame, bg=self.colors['bg_frame'])
         preset_row.pack(fill=tk.X, padx=10, pady=(0, 10))
-        tk.Button(preset_row, text="💾 Save Preset", command=self.save_servo_preset,
-                 bg=self.colors['button_bg'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(0, 5))
-        tk.Button(preset_row, text="📂 Load Preset", command=self.load_servo_preset,
-                 bg=self.colors['button_bg'], font=('Arial', 8)).pack(side=tk.LEFT)
+        ctk.CTkButton(preset_row, text="💾 Save Preset", command=self.save_servo_preset,
+                 font=('Arial', 10), width=100).pack(side=tk.LEFT, padx=(0, 5))
+        ctk.CTkButton(preset_row, text="📂 Load Preset", command=self.load_servo_preset,
+                 font=('Arial', 10), width=100).pack(side=tk.LEFT)
         
         # Large control bar
         control_frame = tk.Frame(self.servo_frame, bg=self.colors['bg_frame'])
@@ -1287,19 +1306,19 @@ class SimpleHandControl:
         test_frame = tk.Frame(coord_frame, bg=self.colors['bg_frame'])
         test_frame.pack(fill=tk.X, padx=5, pady=10)
         
-        tk.Button(test_frame, text="▶️ Test Movement", command=self.test_scratch_movement,
-                 bg=self.colors['button_bg'], fg=self.colors['text_main']).pack(side=tk.LEFT, padx=5)
-        tk.Button(test_frame, text="⏹️ Stop Test", command=self.stop_test_movement,
-                 bg=self.colors['button_bg'], fg=self.colors['text_main']).pack(side=tk.LEFT, padx=5)
-        tk.Button(test_frame, text="🏠 Center Arms", command=self.center_arms,
-                 bg=self.colors['button_bg'], fg=self.colors['text_main']).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(test_frame, text="▶️ Test Movement", command=self.test_scratch_movement,
+                 font=('Arial', 11), width=120).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(test_frame, text="⏹️ Stop Test", command=self.stop_test_movement,
+                 font=('Arial', 11), width=90).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(test_frame, text="🏠 Center Arms", command=self.center_arms,
+                 font=('Arial', 11), width=100).pack(side=tk.LEFT, padx=5)
         
         # Export dedicated scratch movement
         export_frame = tk.Frame(coord_frame, bg=self.colors['bg_frame'])
         export_frame.pack(fill=tk.X, padx=5, pady=10)
         
-        tk.Button(export_frame, text="📤 Export Scratch Movement", command=self.export_scratch_arduino,
-                 bg=self.colors['button_bg'], fg=self.colors['text_main']).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(export_frame, text="📤 Export Scratch Movement", command=self.export_scratch_arduino,
+                 font=('Arial', 11), width=180).pack(side=tk.LEFT, padx=5)
     
     def on_mode_change(self):
         """Handle control mode change."""
@@ -1700,10 +1719,10 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             self.is_playing = True
             self.playback_start_time = time.time()
             self.playback_index = 0
-            self.playback_btn.config(text="⏹️ Stop", bg='#ffcccc')
+            self.playback_btn.configure(text="⏹️ Stop", fg_color=self.colors['accent_red'])
             print(f"▶️ Auto-playing {len(self.recorded_layers)} existing layers")
         
-        self.record_btn.config(text="⏹️ Stop", bg='#ffcccc')
+        self.record_btn.configure(text="⏹️ Stop", fg_color=self.colors['accent_red'])
         print("🔴 Started layer recording...")
     
     def stop_recording(self):
@@ -1728,7 +1747,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
                 self.loop_duration.set(round(layer['duration'], 2))
                 print(f"⏱️ First layer sets loop duration: {layer['duration']:.2f}s (all future layers constrained to this time)")
         
-        self.record_btn.config(text="🔴 Record", bg=self.colors['button_bg'])
+        self.record_btn.configure(text="🔴 Record", fg_color=self.default_button_color)
         self.update_layer_list()
     
     def toggle_playback(self):
@@ -1744,14 +1763,14 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             # Start playing ALL recorded layers simultaneously
             self.playback_start_time = time.time()
             self.playback_index = 0
-            self.playback_btn.config(text="⏹️ Stop", bg='#ffcccc')
-            self.markov_btn.config(bg=self.colors['button_bg'])
+            self.playback_btn.configure(text="⏹️ Stop", fg_color=self.colors['accent_red'])
+            self.markov_btn.configure(fg_color=self.default_button_color)
             print(f"▶️ Playing {len(self.recorded_layers)} layers simultaneously")
         else:
             # Stop playback
             self.is_playing = False
             self.playback_layer = None
-            self.playback_btn.config(text="▶️ Play", bg=self.colors['button_bg'])
+            self.playback_btn.configure(text="▶️ Play", fg_color=self.default_button_color)
             print("⏹️ Playback stopped")
         
         self.update_timeline()
@@ -1767,8 +1786,8 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             self.is_playing = False
             self.markov_mode = False
             self.playback_layer = None
-            self.markov_btn.config(text="🎲 Organic", bg=self.colors['button_bg'])
-            self.playback_btn.config(text="▶️ Play", bg=self.colors['button_bg'])
+            self.markov_btn.configure(text="🎲 Organic", fg_color=self.default_button_color)
+            self.playback_btn.configure(text="▶️ Play", fg_color=self.default_button_color)
             print("⏹️ Organic playback stopped")
         else:
             # Start organic playback
@@ -1790,8 +1809,8 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             self.jitter_speed_target = 1.0
             self.last_jitter_update = time.time()
             
-            self.markov_btn.config(text="⏹️ Stop", bg='#ccffcc')
-            self.playback_btn.config(text="▶️ Play", bg=self.colors['button_bg'])
+            self.markov_btn.configure(text="⏹️ Stop", fg_color=self.colors['text_main'])
+            self.playback_btn.configure(text="▶️ Play", fg_color=self.default_button_color)
             print(f"🎲 Organic playback: wobble=±{self.position_wobble.get()}°, jitter=±{self.timing_jitter.get()}%, pause={self.pause_chance.get()}%")
         
         self.update_timeline()
@@ -1801,20 +1820,20 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         self.variation_expanded = not self.variation_expanded
         if self.variation_expanded:
             self.variation_content.pack(fill=tk.X, pady=(0, 5))
-            self.variation_btn.config(text="▼ Organic Variations")
+            self.variation_btn.configure(text="▼ Organic Variations")
         else:
             self.variation_content.pack_forget()
-            self.variation_btn.config(text="▶ Organic Variations")
+            self.variation_btn.configure(text="▶ Organic Variations")
     
     def toggle_hw_config_panel(self, event=None):
         """Toggle the hardware configuration panel."""
         self.hw_config_expanded = not self.hw_config_expanded
         if self.hw_config_expanded:
             self.hw_config_content.pack(fill=tk.X, pady=(0, 5))
-            self.hw_config_btn.config(text="▼ Hardware Config")
+            self.hw_config_btn.configure(text="▼ Hardware Config")
         else:
             self.hw_config_content.pack_forget()
-            self.hw_config_btn.config(text="▶ Hardware Config")
+            self.hw_config_btn.configure(text="▶ Hardware Config")
     
     def apply_and_save_config(self):
         """Apply hardware config from UI and save to file."""
@@ -1998,7 +2017,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             self.pir_state = 'idle'
             self.pir_state_start_time = time.time()
             self.pir_last_motion_time = time.time()  # Start fresh
-            self.pir_simulate_btn.config(state=tk.NORMAL)
+            self.pir_simulate_btn.configure(state='normal')
             self.update_pir_state_display()
             
             # Start PIR playback if we have recordings assigned
@@ -2010,7 +2029,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         else:
             # Disable PIR mode
             self.pir_state = 'idle'
-            self.pir_simulate_btn.config(state=tk.DISABLED)
+            self.pir_simulate_btn.configure(state='disabled')
             self.pir_state_label.config(text="OFF", bg='#888888')
             self.pir_timer_label.config(text="")
             print("⚪ PIR Mode disabled")
@@ -2060,8 +2079,8 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             print(f"👋 Motion! {self.pir_previous_state} → ACTIVE")
             
             # Flash the simulate button briefly to show activity
-            self.pir_simulate_btn.config(bg='#FF6600')
-            self.root.after(200, lambda: self.pir_simulate_btn.config(bg='#FFB366'))
+            self.pir_simulate_btn.configure(fg_color='#FF6600')
+            self.root.after(200, lambda: self.pir_simulate_btn.configure(fg_color='#FFB366'))
         
         self.update_pir_state_display()
     
@@ -2186,6 +2205,546 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         if not recording_name or recording_name == '(None)':
             return None
         return self.load_pir_recording(recording_name)
+    
+    def export_pir_state_machine(self):
+        """Export the complete PIR State Machine to Arduino .ino file."""
+        # Validate that we have recordings assigned
+        idle_rec = self.pir_idle_recording.get()
+        active_rec = self.pir_active_recording.get()
+        sleep_rec = self.pir_sleep_recording.get()
+        
+        if not any([idle_rec, active_rec, sleep_rec]):
+            tkinter.messagebox.showwarning("No Recordings", 
+                "Please assign at least one recording to a PIR state before exporting.")
+            return
+        
+        # Load all the recordings
+        recordings = {}
+        for state, rec_name in [('idle', idle_rec), ('active', active_rec), ('sleep', sleep_rec)]:
+            if rec_name and rec_name != '(None)':
+                layers = self.load_pir_recording(rec_name)
+                if layers:
+                    recordings[state] = layers
+                    print(f"📂 Loaded {state}: {rec_name} ({len(layers)} layers)")
+                    for layer in layers:
+                        print(f"   Layer '{layer.get('name')}': {len(layer.get('data', []))} frames, duration={layer.get('duration', 0):.2f}s")
+                else:
+                    print(f"⚠️ Could not load recording for {state}: {rec_name}")
+        
+        if not recordings:
+            tkinter.messagebox.showerror("Load Failed", "Could not load any of the assigned recordings.")
+            return
+        
+        # Generate the Arduino code
+        code = self.generate_pir_state_machine_code(recordings)
+        
+        # Save to file
+        filename = f"pir_state_machine_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.ino"
+        filepath = os.path.join(os.getcwd(), filename)
+        
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(code)
+            
+            # Show success with details
+            states_info = []
+            for state in ['idle', 'active', 'sleep']:
+                rec = getattr(self, f'pir_{state}_recording').get()
+                speed = getattr(self, f'pir_{state}_speed').get()
+                if rec and rec != '(None)':
+                    states_info.append(f"  {state.upper()}: {rec} @ {speed}x speed")
+                else:
+                    states_info.append(f"  {state.upper()}: (none)")
+            
+            tkinter.messagebox.showinfo("PIR Export Successful", 
+                f"Arduino code exported to:\n{filepath}\n\n" +
+                f"State Recordings:\n" + "\n".join(states_info) + "\n\n" +
+                f"Timing:\n" +
+                f"  Active duration: {self.pir_active_duration.get()}s\n" +
+                f"  Sleep timeout: {self.pir_sleep_timeout.get()} min\n" +
+                f"  Blend time: {self.pir_transition_time.get()}s")
+            
+            print(f"📤 PIR State Machine exported to {filepath}")
+            
+        except Exception as e:
+            tkinter.messagebox.showerror("Export Failed", f"Failed to export:\n{e}")
+    
+    def generate_pir_state_machine_code(self, recordings):
+        """Generate Arduino code for the PIR state machine."""
+        
+        # Hardware config
+        hw = self.hardware_config
+        pins = hw['pin_mapping']
+        reversed_servos = hw['reversed_servos']
+        # Use hardware config limits (matches listener behavior: 0-45 for the physical servos)
+        min_angle = hw['global_min_angle']
+        max_angle = hw['global_max_angle']
+        
+        # Timing config
+        active_duration_ms = int(self.pir_active_duration.get() * 1000)
+        sleep_timeout_ms = int(self.pir_sleep_timeout.get() * 60 * 1000)
+        blend_time_ms = int(self.pir_transition_time.get() * 1000)
+        
+        # Speeds (as fixed-point multipliers, 100 = 1.0x)
+        idle_speed = int(self.pir_idle_speed.get() * 100)
+        active_speed = int(self.pir_active_speed.get() * 100)
+        sleep_speed = int(self.pir_sleep_speed.get() * 100)
+        
+        code = f'''// PIR State Machine - Auto-generated by Hand Control Interface
+// Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+// 
+// State Machine:
+//   MOTION DETECTED -> ACTIVE state (plays active recording)
+//   After {self.pir_active_duration.get()}s no motion -> IDLE state  
+//   After {self.pir_sleep_timeout.get()} min idle -> SLEEP state
+//   Any motion -> back to ACTIVE
+//
+// Smooth blending between states over {self.pir_transition_time.get()}s
+
+#include <Servo.h>
+
+// ==================== CONFIGURATION ====================
+#define PIR_PIN 3  // PIR sensor input pin
+#define NUM_SERVOS 8
+#define UPDATE_INTERVAL 5  // ms between servo updates (200Hz)
+
+// Timing (milliseconds)
+const unsigned long ACTIVE_DURATION = {active_duration_ms}UL;
+const unsigned long SLEEP_TIMEOUT = {sleep_timeout_ms}UL;
+const unsigned long BLEND_TIME = {blend_time_ms}UL;
+
+// Playback speeds (100 = 1.0x, 50 = 0.5x, 200 = 2.0x)
+const int IDLE_SPEED = {idle_speed};
+const int ACTIVE_SPEED = {active_speed};
+const int SLEEP_SPEED = {sleep_speed};
+
+// Servo pin mapping
+const int servoPins[NUM_SERVOS] = {{{', '.join(map(str, pins))}}};
+
+// Reversed servo flags
+const bool servoReversed[NUM_SERVOS] = {{{', '.join(['true' if i in reversed_servos else 'false' for i in range(8)])}}};
+
+// Angle limits
+const int MIN_ANGLE = {min_angle};
+const int MAX_ANGLE = {max_angle};
+
+// ==================== STATE MACHINE ====================
+enum State {{ STATE_IDLE, STATE_ACTIVE, STATE_SLEEP }};
+State currentState = STATE_IDLE;
+State previousState = STATE_IDLE;
+
+unsigned long lastMotionTime = 0;
+unsigned long stateStartTime = 0;
+unsigned long transitionStartTime = 0;
+float blendFactor = 1.0;
+
+// Current servo positions (for blending)
+int currentPositions[NUM_SERVOS] = {{90, 90, 90, 90, 90, 90, 90, 90}};
+int transitionFromPositions[NUM_SERVOS];
+
+// ==================== SERVO OBJECTS ====================
+Servo servos[NUM_SERVOS];
+
+'''
+        
+        # Generate the movement data arrays for each state
+        for state_name, layers in recordings.items():
+            code += self._generate_state_movement_data(state_name, layers, min_angle, max_angle)
+        
+        code += '''
+// ==================== HELPER FUNCTIONS ====================
+
+int applyServoLimits(int angle, int servoIdx) {
+  // Map 0-180 stored value to MIN_ANGLE-MAX_ANGLE output (matches listener behavior)
+  int pos = map(angle, 0, 180, MIN_ANGLE, MAX_ANGLE);
+  pos = constrain(pos, MIN_ANGLE, MAX_ANGLE);
+  
+  // Apply reversal WITHIN the output range (matches listener: MAX_ANGLE - pos)
+  if (servoReversed[servoIdx]) {
+    pos = MAX_ANGLE - pos;
+  }
+  return pos;
+}
+
+int blendPositions(int from, int to, float factor) {
+  // Smooth easing (ease-in-out)
+  float easedFactor = factor < 0.5 
+    ? 2.0 * factor * factor 
+    : 1.0 - pow(-2.0 * factor + 2.0, 2) / 2.0;
+  return from + (int)((to - from) * easedFactor);
+}
+
+int getStateSpeed(State state) {
+  switch (state) {
+    case STATE_IDLE: return IDLE_SPEED;
+    case STATE_ACTIVE: return ACTIVE_SPEED;
+    case STATE_SLEEP: return SLEEP_SPEED;
+    default: return 100;
+  }
+}
+
+'''
+        
+        # Generate the position lookup function for each state
+        code += self._generate_position_lookup_functions(recordings)
+        
+        code += '''
+// ==================== STATE MACHINE LOGIC ====================
+
+void checkStateTransitions() {
+  unsigned long now = millis();
+  unsigned long timeSinceMotion = now - lastMotionTime;
+  
+  State newState = currentState;
+  
+  switch (currentState) {
+    case STATE_ACTIVE:
+      // After active duration with no motion, go to idle
+      if (timeSinceMotion >= ACTIVE_DURATION) {
+        newState = STATE_IDLE;
+      }
+      break;
+      
+    case STATE_IDLE:
+      // After sleep timeout, go to sleep
+      if (timeSinceMotion >= SLEEP_TIMEOUT) {
+        newState = STATE_SLEEP;
+      }
+      break;
+      
+    case STATE_SLEEP:
+      // Only wake up on motion (handled in triggerMotion)
+      break;
+  }
+  
+  if (newState != currentState) {
+    startTransition(newState);
+  }
+  
+  // Update blend factor
+  if (now - transitionStartTime < BLEND_TIME) {
+    blendFactor = (float)(now - transitionStartTime) / BLEND_TIME;
+  } else {
+    blendFactor = 1.0;
+  }
+}
+
+void startTransition(State newState) {
+  Serial.print("State: ");
+  Serial.print(currentState);
+  Serial.print(" -> ");
+  Serial.println(newState);
+  
+  // Save current positions for blending
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    transitionFromPositions[i] = currentPositions[i];
+  }
+  
+  previousState = currentState;
+  currentState = newState;
+  stateStartTime = millis();
+  transitionStartTime = millis();
+  blendFactor = 0.0;
+}
+
+void triggerMotion() {
+  unsigned long now = millis();
+  lastMotionTime = now;
+  
+  if (currentState != STATE_ACTIVE) {
+    startTransition(STATE_ACTIVE);
+    Serial.println("PIR: Motion detected!");
+  }
+}
+
+// ==================== MAIN PLAYBACK ====================
+
+void updateServos() {
+  static unsigned long playbackTime = 0;
+  static unsigned long lastUpdate = 0;
+  
+  unsigned long now = millis();
+  unsigned long elapsed = now - lastUpdate;
+  lastUpdate = now;
+  
+  // Advance playback time based on current state speed
+  int speed = getStateSpeed(currentState);
+  playbackTime += (elapsed * speed) / 100;
+  
+  // Get target positions from current state recording
+  int targetPositions[NUM_SERVOS];
+  getPositionsForState(currentState, playbackTime, targetPositions);
+  
+  // If blending, interpolate from transition positions
+  if (blendFactor < 1.0) {
+    for (int i = 0; i < NUM_SERVOS; i++) {
+      currentPositions[i] = blendPositions(transitionFromPositions[i], targetPositions[i], blendFactor);
+    }
+  } else {
+    for (int i = 0; i < NUM_SERVOS; i++) {
+      currentPositions[i] = targetPositions[i];
+    }
+  }
+  
+  // Write to servos
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    int angle = applyServoLimits(currentPositions[i], i);
+    servos[i].write(angle);
+  }
+}
+
+'''
+        
+        # Setup and loop
+        code += '''
+// ==================== SETUP & LOOP ====================
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("PIR State Machine Starting...");
+  
+  // Initialize PIR pin
+  pinMode(PIR_PIN, INPUT);
+  
+  // Attach servos
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    servos[i].attach(servoPins[i]);
+    servos[i].write(90);  // Center position
+  }
+  
+  // Initialize timing
+  lastMotionTime = millis();
+  stateStartTime = millis();
+  transitionStartTime = millis();
+  
+  Serial.println("Ready - starting in IDLE state");
+}
+
+void loop() {
+  // Check PIR sensor
+  if (digitalRead(PIR_PIN) == HIGH) {
+    triggerMotion();
+  }
+  
+  // Update state machine
+  checkStateTransitions();
+  
+  // Update servo positions
+  updateServos();
+  
+  delay(UPDATE_INTERVAL);
+}
+'''
+        
+        return code
+    
+    def _generate_state_movement_data(self, state_name, layers, min_angle, max_angle):
+        """Generate the PROGMEM movement data arrays for a state."""
+        
+        # Merge all layers into a single timeline
+        # For simplicity, we'll sample at fixed intervals and merge
+        if not layers:
+            return f"\n// No data for {state_name} state\n"
+        
+        # Find the duration and sample rate
+        max_duration = max(layer['duration'] for layer in layers)
+        sample_interval = 0.02  # 50Hz sampling
+        num_samples = int(max_duration / sample_interval) + 1
+        
+        # Limit to reasonable size (max ~500 samples = 10 seconds at 50Hz)
+        if num_samples > 500:
+            sample_interval = max_duration / 500
+            num_samples = 500
+        
+        # Initialize position arrays
+        positions = [[90] * 8 for _ in range(num_samples)]
+        
+        # Debug: track if we found any actual data
+        found_any_data = False
+        
+        # Process each layer
+        for layer in layers:
+            data = layer.get('data', [])
+            if not data:
+                print(f"  ⚠️ Layer '{layer.get('name', 'unknown')}' has no data")
+                continue
+            
+            print(f"  📊 Processing layer '{layer.get('name', 'unknown')}' with {len(data)} frames")
+            
+            # Debug: check first frame structure
+            if data:
+                first_frame = data[0]
+                print(f"     First frame keys: {list(first_frame.keys())}")
+                print(f"     finger_positions: {first_frame.get('finger_positions', 'MISSING')}")
+                print(f"     arm_positions: {first_frame.get('arm_positions', 'MISSING')}")
+            
+            for sample_idx in range(num_samples):
+                t = sample_idx * sample_interval
+                
+                # Find the keyframes around this time
+                debug_this = (sample_idx == 0)  # Debug first sample only
+                pos = self._interpolate_layer_at_time(layer, t, debug_sample=debug_this)
+                if debug_this and pos:
+                    print(f"     Interpolated pos for t=0: {pos}")
+                if pos:
+                    # Merge into positions (later layers override)
+                    for servo_idx, val in enumerate(pos):
+                        if val is not None:
+                            positions[sample_idx][servo_idx] = int(val)
+                            found_any_data = True
+        
+        # Debug output
+        if found_any_data:
+            # Check a sample position
+            sample_pos = positions[len(positions)//2]
+            print(f"  ✅ Found data! Middle sample: {sample_pos}")
+        else:
+            print(f"  ❌ No actual movement data was extracted!")
+        
+        # Generate the PROGMEM arrays
+        duration_ms = int(max_duration * 1000)
+        
+        code = f"\n// {state_name.upper()} state movement data ({num_samples} samples, {max_duration:.1f}s duration)\n"
+        code += f"const unsigned long {state_name}Duration = {duration_ms}UL;\n"
+        code += f"const int {state_name}NumSamples = {num_samples};\n"
+        code += f"const uint8_t {state_name}Data[{num_samples}][NUM_SERVOS] PROGMEM = {{\n"
+        
+        for i, sample in enumerate(positions):
+            # Clamp values to 0-180 for uint8_t storage
+            clamped = [max(0, min(180, v)) for v in sample]
+            code += f"  {{{', '.join(map(str, clamped))}}}"
+            if i < num_samples - 1:
+                code += ","
+            if i % 10 == 9:  # Newline every 10 samples for readability
+                code += "\n"
+        
+        code += "\n};\n"
+        
+        return code
+    
+    def _interpolate_layer_at_time(self, layer, t, debug_sample=False):
+        """Get interpolated position from a layer at time t."""
+        data = layer.get('data', [])
+        duration = layer.get('duration', 1.0)
+        
+        if not data:
+            if debug_sample:
+                print(f"     _interpolate: No data in layer!")
+            return None
+        
+        # Handle looping
+        if duration > 0:
+            t = t % duration
+        
+        # Find surrounding keyframes
+        prev_frame = None
+        next_frame = None
+        
+        for frame in data:
+            frame_time = frame.get('time', 0)
+            if frame_time <= t:
+                prev_frame = frame
+            if frame_time >= t and next_frame is None:
+                next_frame = frame
+                break
+        
+        if prev_frame is None:
+            prev_frame = data[0]
+        if next_frame is None:
+            next_frame = data[-1] if data else prev_frame
+        
+        if debug_sample:
+            print(f"     _interpolate: t={t:.3f}, prev_time={prev_frame.get('time', 0):.3f}")
+            print(f"     prev_fingers: {prev_frame.get('finger_positions', 'NONE')}")
+            print(f"     prev_arm: {prev_frame.get('arm_positions', 'NONE')}")
+        
+        # Interpolate
+        prev_time = prev_frame.get('time', 0)
+        next_time = next_frame.get('time', 0)
+        
+        if next_time == prev_time:
+            factor = 0
+        else:
+            factor = (t - prev_time) / (next_time - prev_time)
+        
+        # Get positions
+        result = [None] * 8
+        
+        # Handle fingers (recording format uses 'finger_positions')
+        prev_fingers = prev_frame.get('finger_positions', prev_frame.get('fingers', []))
+        next_fingers = next_frame.get('finger_positions', next_frame.get('fingers', []))
+        if prev_fingers and next_fingers:
+            for i in range(min(5, len(prev_fingers), len(next_fingers))):
+                prev_val = prev_fingers[i]
+                next_val = next_fingers[i]
+                if prev_val is not None and next_val is not None:
+                    result[i] = prev_val + (next_val - prev_val) * factor
+                elif prev_val is not None:
+                    result[i] = prev_val
+                elif next_val is not None:
+                    result[i] = next_val
+        
+        # Handle arm (recording format uses 'arm_positions')
+        prev_arm = prev_frame.get('arm_positions', prev_frame.get('arm', []))
+        next_arm = next_frame.get('arm_positions', next_frame.get('arm', []))
+        if prev_arm and next_arm:
+            for i in range(min(3, len(prev_arm), len(next_arm))):
+                prev_val = prev_arm[i]
+                next_val = next_arm[i]
+                if prev_val is not None and next_val is not None:
+                    result[5 + i] = prev_val + (next_val - prev_val) * factor
+                elif prev_val is not None:
+                    result[5 + i] = prev_val
+                elif next_val is not None:
+                    result[5 + i] = next_val
+        
+        return result
+    
+    def _generate_position_lookup_functions(self, recordings):
+        """Generate the function that looks up positions for each state WITH interpolation.
+        
+        Note: PROGMEM access requires direct array references, so we generate
+        inline code for each state rather than using a function pointer.
+        """
+        
+        code = "void getPositionsForState(State state, unsigned long playbackTime, int* positions) {\n"
+        code += "  unsigned long duration;\n"
+        code += "  int numSamples;\n"
+        code += "  int sampleIdx, nextIdx;\n"
+        code += "  unsigned long samplePos;\n"
+        code += "  int fraction;\n"
+        code += "  \n"
+        code += "  switch (state) {\n"
+        
+        for state_name in ['idle', 'active', 'sleep']:
+            if state_name in recordings:
+                code += f"    case STATE_{state_name.upper()}:\n"
+                code += f"      duration = {state_name}Duration;\n"
+                code += f"      numSamples = {state_name}NumSamples;\n"
+                code += f"      if (duration > 0) playbackTime = playbackTime % duration;\n"
+                code += f"      // Calculate interpolated position\n"
+                code += f"      samplePos = ((unsigned long)playbackTime * numSamples * 1000UL) / duration;\n"
+                code += f"      sampleIdx = samplePos / 1000;\n"
+                code += f"      if (sampleIdx >= numSamples) sampleIdx = numSamples - 1;\n"
+                code += f"      nextIdx = (sampleIdx + 1) % numSamples;\n"
+                code += f"      fraction = samplePos % 1000;\n"
+                code += f"      for (int i = 0; i < NUM_SERVOS; i++) {{\n"
+                code += f"        int curr = pgm_read_byte(&{state_name}Data[sampleIdx][i]);\n"
+                code += f"        int next = pgm_read_byte(&{state_name}Data[nextIdx][i]);\n"
+                code += f"        positions[i] = curr + ((next - curr) * fraction) / 1000;\n"
+                code += f"      }}\n"
+                code += f"      break;\n"
+        
+        # Default case
+        code += "    default:\n"
+        code += "      for (int i = 0; i < NUM_SERVOS; i++) {\n"
+        code += "        positions[i] = 90;\n"
+        code += "      }\n"
+        code += "      break;\n"
+        code += "  }\n"
+        code += "}\n\n"
+        
+        return code
     
     # ==================== END PIR METHODS ====================
 
@@ -3308,8 +3867,8 @@ void loop() {
                 phrase_files.append(filename)
                 phrase_listbox.insert(tk.END, f"Phrase {len(phrase_files) + 1}: {os.path.basename(filename)}")
         
-        tk.Button(phrase_frame, text="➕ Add Phrase from File", command=add_phrase,
-                 bg=self.colors['button_bg']).pack(pady=5)
+        ctk.CTkButton(phrase_frame, text="➕ Add Phrase from File", command=add_phrase,
+                 font=('Arial', 11), width=160).pack(pady=5)
         
         # Export button
         def do_export():
@@ -3341,10 +3900,10 @@ void loop() {
         button_frame = tk.Frame(dialog, bg=self.colors['bg_main'])
         button_frame.pack(fill=tk.X, padx=10, pady=10)
         
-        tk.Button(button_frame, text="✅ Export", command=do_export,
-                 bg=self.colors['button_bg'], font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=5)
-        tk.Button(button_frame, text="❌ Cancel", command=dialog.destroy,
-                 bg=self.colors['button_bg']).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(button_frame, text="✅ Export", command=do_export,
+                 font=('Arial', 12, 'bold'), width=100).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(button_frame, text="❌ Cancel", command=dialog.destroy,
+                 font=('Arial', 11), width=80).pack(side=tk.LEFT, padx=5)
     
     def generate_markov_arduino_code(self, pir_enabled=True, pir_pin=2, motion_timeout=5, additional_phrase_files=None):
         """Generate Arduino code with Markov chain transitions between phrases."""
