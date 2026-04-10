@@ -38,33 +38,33 @@ class SimpleHandControl:
     """Simple 8-servo hand control with cursor wave control and Arduino export."""
     
     def __init__(self):
-        # Set CustomTkinter appearance - Dark 98 / Lain aesthetic
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("dark-blue")
+        # Set CustomTkinter appearance - Windows 98 classic style
+        ctk.set_appearance_mode("light")
+        ctk.set_default_color_theme("blue")
         
         self.root = ctk.CTk()
-        self.root.title("SERVO CONTROL INTERFACE v1.0")
+        self.root.title("Servo Control Interface")
         self.root.geometry("1380x940")
         self.root.minsize(1200, 820)
         
-        # Dark 98 / Serial Experiments Lain color scheme
+        # Windows 98 classic color scheme - clean and readable
         self.colors = {
-            'bg_main': '#1a1a2e',      # Deep navy background
-            'bg_frame': '#16213e',     # Slightly lighter frame bg
-            'bg_dark': '#0f0f1a',      # Darkest elements
-            'text_main': '#00ff41',    # Phosphor green (Lain terminal)
-            'text_dim': '#4a9f4a',     # Dimmed green
-            'text_cyan': '#00d4ff',    # Cyan accent
-            'button_bg': '#2d2d44',    # Dark gray button (beveled look)
-            'button_hover': '#3d3d5c', # Button hover
-            'button_active': '#00ff41', # Active/recording state
-            'canvas_bg': '#0a0a12',    # Near-black canvas
-            'accent_red': '#ff3366',   # Recording/alert red
-            'accent_cyan': '#00d4ff',  # Cyan highlights
-            'border': '#333355'        # Subtle border color
+            'bg_main': '#d4d0c8',      # Classic Win98 gray
+            'bg_frame': '#d4d0c8',     # Same gray for frames
+            'bg_dark': '#808080',      # Darker gray for inset areas
+            'text_main': '#000000',    # Black text - maximum readability
+            'text_dim': '#404040',     # Dark gray for secondary text
+            'text_cyan': '#000080',    # Navy blue accent
+            'button_bg': '#d4d0c8',    # Button face
+            'button_hover': '#e4e0d8', # Lighter on hover
+            'button_active': '#000080', # Navy blue when active
+            'canvas_bg': '#ffffff',    # White canvas/input areas
+            'accent_red': '#ff0000',   # Pure red for recording
+            'accent_cyan': '#000080',  # Navy blue highlights
+            'border': '#808080'        # Gray border
         }
-        # Default CTkButton color
-        self.default_button_color = '#2d2d44'
+        # Default CTkButton color - match Win98 look
+        self.default_button_color = '#d4d0c8'
         
         # Servo configuration
         self.num_fingers = 5
@@ -155,27 +155,65 @@ class SimpleHandControl:
         # PIR timing configuration
         self.pir_active_duration = tk.IntVar(value=30)  # Seconds to stay active after motion
         self.pir_sleep_timeout = tk.IntVar(value=30)  # Minutes of no motion before sleep (30 min default)
-        self.pir_transition_time = tk.DoubleVar(value=2.0)  # Seconds to blend between states
+        self.pir_transition_time = tk.DoubleVar(value=5.0)  # Seconds to blend between states
         
-        # Recording assignments for each state (filename from pir_recordings/ folder)
-        self.pir_idle_recording = tk.StringVar(value="")
-        self.pir_active_recording = tk.StringVar(value="")
-        self.pir_sleep_recording = tk.StringVar(value="")
+        # Crossfade settings (organic blending between recordings within a state)
+        self.pir_crossfade_enabled = tk.BooleanVar(value=True)
+        self.pir_crossfade_interval_min = tk.IntVar(value=10)   # Min seconds between crossfades
+        self.pir_crossfade_interval_max = tk.IntVar(value=25)  # Max seconds between crossfades
+        self.pir_crossfade_duration_min = tk.IntVar(value=8)   # Min crossfade length (seconds)
+        self.pir_crossfade_duration_max = tk.IntVar(value=15)   # Max crossfade length (seconds)
+        
+        # Recording assignments for each state (list of filenames from pir_recordings/ folder)
+        self.pir_idle_recordings = []  # List of recording names for IDLE state
+        self.pir_active_recordings = []  # List of recording names for ACTIVE state
+        self.pir_sleep_recordings = []  # List of recording names for SLEEP state
+        
+        # Current recording index for each state (for cycling through multiple recordings)
+        self.pir_recording_index = {'idle': 0, 'active': 0, 'sleep': 0}
+        self.pir_recording_progress = 0.0  # Progress through current recording (0.0-1.0)
+        self.pir_crossfade_to_next = False  # Flag to trigger crossfade to next recording
         
         # Cache for loaded PIR recordings {filename: layers_data}
         self.pir_cached_recordings = {}
         self.pir_recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pir_recordings")
-        
-        # State-specific playback speeds
-        self.pir_idle_speed = tk.DoubleVar(value=0.5)  # Slow for idle
-        self.pir_active_speed = tk.DoubleVar(value=1.5)  # Fast for active
-        self.pir_sleep_speed = tk.DoubleVar(value=0.2)  # Very slow for sleep
         
         # State transition tracking
         self.pir_blend_factor = 0.0  # 0.0-1.0 for smooth state transitions
         self.pir_previous_state = None
         self.pir_transition_start = 0
         self.pir_transition_positions = None  # Store positions at transition start for blending
+        
+        # Recording crossfade tracking (within same state)
+        self.pir_rec_blend_factor = 0.0
+        self.pir_prev_rec_positions = None
+        self.pir_next_crossfade_time = 0  # When to start next crossfade
+        self.pir_is_crossfading = False    # Currently crossfading between recordings
+        self.pir_crossfade_start_time = 0  # When current crossfade started
+        self.pir_crossfade_duration = 3.0  # Duration of current crossfade (seconds)
+        self.pir_crossfade_target_idx = 0  # Target recording index during crossfade
+
+        # Markov segment system (alternative to crossfade)
+        self.pir_markov_enabled = tk.BooleanVar(value=False)  # Use Markov instead of crossfade
+        self.pir_markov_segment_length = tk.DoubleVar(value=1.0)  # Segment length in seconds
+        self.pir_markov_chaos = tk.IntVar(value=30)  # 0=smooth, 100=creative/random
+        self.pir_markov_blend_time = tk.DoubleVar(value=0.1)  # Blend time between segments (keep short for momentum)
+        self.pir_markov_hardware_preview = tk.BooleanVar(value=True)  # Show what Arduino will actually do
+        
+        # Hardware preview constants (must match Arduino export)
+        self.HARDWARE_SAMPLES_PER_SEG = 12
+        self.HARDWARE_TOP_K_TRANSITIONS = 6
+        
+        # Markov runtime state
+        self.pir_markov_segments = {}  # {state: [segment_data, ...]}
+        self.pir_markov_transitions = {}  # {state: [[prob array], ...]}
+        self.pir_markov_hw_segments = {}  # {state: [hw_segment_data, ...]} - subsampled for hardware preview
+        self.pir_markov_hw_transitions = {}  # {state: [[sparse top-k], ...]} - sparse for hardware preview
+        self.pir_current_segment_idx = 0
+        self.pir_segment_start_time = 0
+        self.pir_prev_segment_end_positions = None
+        self.pir_needs_blend = False
+        self.pir_markov_initialized = False
 
         # Control mode
         self.control_mode = tk.StringVar(value="cursor")
@@ -185,7 +223,12 @@ class SimpleHandControl:
         self.hand_controller = None
         if HAND_CONTROLLER_AVAILABLE:
             try:
-                self.hand_controller = HandExpressionController(port=self.default_port, clean_output=True)
+                self.hand_controller = HandExpressionController(
+                    port=self.default_port, 
+                    clean_output=True,
+                    min_angle=self.hardware_config['global_min_angle'],
+                    max_angle=self.hardware_config['global_max_angle']
+                )
             except Exception as e:
                 print(f"[WARNING] Could not initialize hand controller: {e}")
         
@@ -243,59 +286,122 @@ class SimpleHandControl:
         
         # Title and recording controls at top
         top_bar = tk.Frame(main_frame, bg=self.colors['bg_main'])
-        top_bar.pack(fill=tk.X, pady=(10, 10), padx=10)
+        top_bar.pack(fill=tk.X, pady=(10, 5), padx=10)
         
-        title = tk.Label(top_bar, text="🤖 8-Servo Hand Control", 
+        title = tk.Label(top_bar, text="Servo Control", 
                         bg=self.colors['bg_main'], fg=self.colors['text_main'],
                         font=('Arial', 14, 'bold'))
         title.pack(side=tk.LEFT)
         
-        # Recording controls on top right
-        record_controls = tk.Frame(top_bar, bg=self.colors['bg_main'])
-        record_controls.pack(side=tk.RIGHT)
+        # Connection status on far right
+        self.connection_label = tk.Label(top_bar, text="● Disconnected", 
+                                         bg=self.colors['bg_main'], fg='#808080',
+                                         font=('Arial', 9))
+        self.connection_label.pack(side=tk.RIGHT, padx=10)
         
-        self.record_btn = ctk.CTkButton(record_controls, text="🔴 Record", 
+        # Toolbar with grouped buttons
+        toolbar = tk.Frame(main_frame, bg=self.colors['bg_main'], relief=tk.GROOVE, bd=1)
+        toolbar.pack(fill=tk.X, pady=(0, 10), padx=10)
+        
+        # Helper to create separator
+        def add_separator():
+            sep = tk.Frame(toolbar, width=2, bg='#808080')
+            sep.pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=4)
+        
+        # === TRANSPORT GROUP ===
+        transport_frame = tk.Frame(toolbar, bg=self.colors['bg_main'])
+        transport_frame.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        self.record_btn = ctk.CTkButton(transport_frame, text="● REC", 
                                    command=self.toggle_recording,
-                                   font=('Arial', 12, 'bold'), width=100)
+                                   font=('Arial', 11, 'bold'), width=70,
+                                   fg_color='#c0c0c0', text_color='black',
+                                   hover_color='#e0e0e0',
+                                   corner_radius=0, border_width=2, border_color='#808080')
         self.record_btn.pack(side=tk.LEFT, padx=2)
         
-        self.playback_btn = ctk.CTkButton(record_controls, text="▶️ Play", 
+        self.playback_btn = ctk.CTkButton(transport_frame, text="▶ Play", 
                                      command=self.toggle_playback,
-                                     font=('Arial', 12, 'bold'), width=100)
+                                     font=('Arial', 11, 'bold'), width=70,
+                                     fg_color='#c0c0c0', text_color='black',
+                                     hover_color='#e0e0e0',
+                                     corner_radius=0, border_width=2, border_color='#808080')
         self.playback_btn.pack(side=tk.LEFT, padx=2)
         
-        self.markov_btn = ctk.CTkButton(record_controls, text="🎲 Organic", 
+        self.markov_btn = ctk.CTkButton(transport_frame, text="~ Organic", 
                                     command=self.toggle_markov_playback,
-                                    font=('Arial', 12, 'bold'), width=100)
+                                    font=('Arial', 11), width=80,
+                                    fg_color='#c0c0c0', text_color='black',
+                                    hover_color='#e0e0e0',
+                                    corner_radius=0, border_width=2, border_color='#808080')
         self.markov_btn.pack(side=tk.LEFT, padx=2)
         
-        ctk.CTkButton(record_controls, text="📸 Capture", 
-                 command=self.capture_keyframe,
-                 font=('Arial', 11), width=80).pack(side=tk.LEFT, padx=2)
+        add_separator()
         
-        ctk.CTkButton(record_controls, text="💾 Save", 
+        # === FILE GROUP ===
+        file_frame = tk.Frame(toolbar, bg=self.colors['bg_main'])
+        file_frame.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        ctk.CTkButton(file_frame, text="Save", 
                  command=self.save_recording,
-                 font=('Arial', 11), width=70).pack(side=tk.LEFT, padx=2)
+                 font=('Arial', 10), width=60,
+                 fg_color='#c0c0c0', text_color='black',
+                 hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
         
-        ctk.CTkButton(record_controls, text="📂 Load", 
+        ctk.CTkButton(file_frame, text="Load", 
                  command=self.load_recording,
-                 font=('Arial', 11), width=70).pack(side=tk.LEFT, padx=2)
+                 font=('Arial', 10), width=60,
+                 fg_color='#c0c0c0', text_color='black',
+                 hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
         
-        ctk.CTkButton(record_controls, text="📤 Export", 
+        add_separator()
+        
+        # === EXPORT GROUP ===
+        export_frame = tk.Frame(toolbar, bg=self.colors['bg_main'])
+        export_frame.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        ctk.CTkButton(export_frame, text="Export .ino", 
                  command=self.export_arduino_code,
-                 font=('Arial', 11), width=80).pack(side=tk.LEFT, padx=2)
+                 font=('Arial', 10), width=85,
+                 fg_color='#c0c0c0', text_color='black',
+                 hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
         
-        ctk.CTkButton(record_controls, text="🎲 Markov Export", 
+        ctk.CTkButton(export_frame, text="Multi-Phrase", 
                  command=self.export_markov_arduino,
-                 font=('Arial', 11), width=110).pack(side=tk.LEFT, padx=2)
+                 font=('Arial', 10), width=90,
+                 fg_color='#c0c0c0', text_color='black',
+                 hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
         
-        ctk.CTkButton(record_controls, text="🔌 Connect", 
+        add_separator()
+        
+        # === TOOLS GROUP ===
+        tools_frame = tk.Frame(toolbar, bg=self.colors['bg_main'])
+        tools_frame.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        ctk.CTkButton(tools_frame, text="Capture", 
+                 command=self.capture_keyframe,
+                 font=('Arial', 10), width=70,
+                 fg_color='#c0c0c0', text_color='black',
+                 hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
+        
+        ctk.CTkButton(tools_frame, text="Connect", 
                  command=self.reconnect_arduino,
-                 font=('Arial', 11), width=90).pack(side=tk.LEFT, padx=2)
+                 font=('Arial', 10), width=70,
+                 fg_color='#c0c0c0', text_color='black',
+                 hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
         
-        ctk.CTkButton(record_controls, text="🗑️", 
+        ctk.CTkButton(tools_frame, text="Clear All", 
                  command=self.clear_layers,
-                 font=('Arial', 11), width=40).pack(side=tk.LEFT, padx=2)
+                 font=('Arial', 10), width=70,
+                 fg_color='#c0c0c0', text_color='black',
+                 hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
         
         # Status bar
         status_bar = tk.Frame(main_frame, bg=self.colors['bg_dark'], relief=tk.SUNKEN, bd=1)
@@ -448,7 +554,7 @@ class SimpleHandControl:
         tk.Entry(range_row, textvariable=self.config_min_var, width=5, font=('Arial', 8)).pack(side=tk.LEFT)
         tk.Label(range_row, text=" - ", bg=self.colors['bg_frame'], fg=self.colors['text_main']).pack(side=tk.LEFT)
         tk.Entry(range_row, textvariable=self.config_max_var, width=5, font=('Arial', 8)).pack(side=tk.LEFT)
-        tk.Label(range_row, text="° (for export)", bg=self.colors['bg_frame'], 
+        tk.Label(range_row, text="° (hardware output)", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
         
         # Reversed servos
@@ -470,152 +576,219 @@ class SimpleHandControl:
         btn_row.pack(fill=tk.X, padx=5, pady=5)
         ctk.CTkButton(btn_row, text="✅ Apply & Save", command=self.apply_and_save_config,
                  font=('Arial', 11, 'bold'), width=120).pack(side=tk.LEFT, padx=5)
-        tk.Label(btn_row, text="(Affects .ino exports)", bg=self.colors['bg_frame'], 
+        tk.Label(btn_row, text="(Reloads hardware with new settings)", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_dim'], font=('Arial', 7)).pack(side=tk.LEFT)
         
         # ==================== PIR STATE MACHINE PANEL ====================
-        pir_main_frame = tk.LabelFrame(main_frame, text="🔴 PIR State Machine (Test & Export)", 
-                                       bg='#FFE8E8', fg=self.colors['text_main'],
+        pir_main_frame = tk.LabelFrame(main_frame, text="PIR State Machine (Test & Export)", 
+                                       bg=self.colors['bg_frame'], fg=self.colors['text_main'],
                                        font=('Arial', 10, 'bold'))
         pir_main_frame.pack(fill=tk.X, pady=(5, 10), padx=5)
         
         # Top row: Enable toggle, state indicator, simulate button
-        pir_top_row = tk.Frame(pir_main_frame, bg='#FFE8E8')
+        pir_top_row = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
         pir_top_row.pack(fill=tk.X, padx=10, pady=5)
         
         self.pir_enable_cb = tk.Checkbutton(pir_top_row, text="Enable PIR Mode", 
                                            variable=self.pir_enabled,
-                                           bg='#FFE8E8', fg=self.colors['text_main'],
+                                           bg=self.colors['bg_frame'], fg=self.colors['text_main'],
                                            font=('Arial', 9, 'bold'),
                                            command=self.on_pir_toggle)
         self.pir_enable_cb.pack(side=tk.LEFT)
         
         # State indicator
-        tk.Label(pir_top_row, text="  State:", bg='#FFE8E8', 
+        tk.Label(pir_top_row, text="  State:", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_main'], font=('Arial', 9)).pack(side=tk.LEFT, padx=(20, 5))
         self.pir_state_label = tk.Label(pir_top_row, text="OFF", 
                                         bg='#888888', fg='white',
                                         font=('Arial', 9, 'bold'), width=8, relief=tk.RAISED)
         self.pir_state_label.pack(side=tk.LEFT)
         
+        # Recording indicator (shows which recording is playing)
+        self.pir_rec_label = tk.Label(pir_top_row, text="", 
+                                      bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                                      font=('Arial', 8))
+        self.pir_rec_label.pack(side=tk.LEFT, padx=(3, 0))
+        
         # Simulate motion button
-        self.pir_simulate_btn = ctk.CTkButton(pir_top_row, text="👋 Simulate Motion", 
+        self.pir_simulate_btn = ctk.CTkButton(pir_top_row, text="Simulate Motion", 
                                          command=self.simulate_pir_motion,
-                                         fg_color='#FFB366', font=('Arial', 11, 'bold'),
+                                         fg_color='#c0c0c0', text_color='black',
+                                         hover_color='#a0a0a0',
+                                         corner_radius=0, border_width=2, border_color='#808080',
                                          state='disabled', width=130)
         self.pir_simulate_btn.pack(side=tk.LEFT, padx=(20, 5))
         
         # Timer display
         self.pir_timer_label = tk.Label(pir_top_row, text="", 
-                                        bg='#FFE8E8', fg=self.colors['text_dim'],
+                                        bg=self.colors['bg_frame'], fg=self.colors['text_dim'],
                                         font=('Arial', 8))
         self.pir_timer_label.pack(side=tk.LEFT, padx=10)
         
         # Save to Library button (saves current recording for PIR states)
-        self.pir_save_btn = ctk.CTkButton(pir_top_row, text="📚 Save to Library", 
+        self.pir_save_btn = ctk.CTkButton(pir_top_row, text="Save to Library", 
                                       command=self.save_to_pir_library,
-                                      fg_color='#99CCFF', font=('Arial', 11, 'bold'),
-                                      width=130)
+                                      fg_color='#c0c0c0', text_color='black',
+                                      hover_color='#e0e0e0',
+                                      corner_radius=0, border_width=2, border_color='#808080',
+                                      width=120)
         self.pir_save_btn.pack(side=tk.RIGHT, padx=5)
         
         # Export PIR State Machine to Arduino
-        self.pir_export_btn = ctk.CTkButton(pir_top_row, text="📤 Export to .ino", 
+        self.pir_export_btn = ctk.CTkButton(pir_top_row, text="Export to .ino", 
                                       command=self.export_pir_state_machine,
-                                      fg_color='#66CC66', font=('Arial', 11, 'bold'),
-                                      width=130)
+                                      fg_color='#c0c0c0', text_color='black',
+                                      hover_color='#e0e0e0',
+                                      corner_radius=0, border_width=2, border_color='#808080',
+                                      width=110)
         self.pir_export_btn.pack(side=tk.RIGHT, padx=5)
         
-        # State assignment cards - three columns
-        pir_states_frame = tk.Frame(pir_main_frame, bg='#FFE8E8')
+        # State assignment cards - three columns with multi-recording support
+        pir_states_frame = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
         pir_states_frame.pack(fill=tk.X, padx=10, pady=5)
         
-        # IDLE state card
-        idle_card = tk.LabelFrame(pir_states_frame, text="😴 IDLE", 
-                                  bg='#E8E8FF', fg='#333366',
-                                  font=('Arial', 9, 'bold'))
+        # Helper to create a state card with listbox and add/remove buttons
+        def create_state_card(parent, title, recordings_list, state_key):
+            card = tk.LabelFrame(parent, text=title, 
+                                bg='#e0e0e0', fg='#000000',
+                                font=('Arial', 9, 'bold'))
+            
+            # Listbox for multiple recordings
+            listbox = tk.Listbox(card, width=18, height=3, font=('Arial', 8),
+                                selectmode=tk.SINGLE, bg='white')
+            listbox.pack(padx=5, pady=2, fill=tk.X)
+            
+            # Button row
+            btn_frame = tk.Frame(card, bg='#e0e0e0')
+            btn_frame.pack(fill=tk.X, padx=5, pady=2)
+            
+            # Add button with dropdown
+            add_btn = tk.Button(btn_frame, text="+", width=3, font=('Arial', 8),
+                              command=lambda: self.add_pir_recording(state_key, listbox))
+            add_btn.pack(side=tk.LEFT, padx=1)
+            
+            # Remove button
+            remove_btn = tk.Button(btn_frame, text="-", width=3, font=('Arial', 8),
+                                  command=lambda: self.remove_pir_recording(state_key, listbox))
+            remove_btn.pack(side=tk.LEFT, padx=1)
+            
+            return card, listbox
+        
+        # Create the three state cards
+        idle_card, self.pir_idle_listbox = create_state_card(
+            pir_states_frame, "IDLE", self.pir_idle_recordings, 'idle')
         idle_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
         
-        tk.Label(idle_card, text="Recording:", bg='#E8E8FF', 
-                fg=self.colors['text_main'], font=('Arial', 8)).pack(anchor=tk.W, padx=5)
-        self.pir_idle_combo = ttk.Combobox(idle_card, width=15, state='readonly')
-        self.pir_idle_combo.pack(padx=5, pady=2)
-        self.pir_idle_combo.bind('<<ComboboxSelected>>', 
-            lambda e: self.pir_idle_recording.set(self.pir_idle_combo.get() if self.pir_idle_combo.current() > 0 else ""))
-        
-        speed_frame = tk.Frame(idle_card, bg='#E8E8FF')
-        speed_frame.pack(fill=tk.X, padx=5, pady=2)
-        tk.Label(speed_frame, text="Speed:", bg='#E8E8FF', 
-                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT)
-        tk.Scale(speed_frame, from_=0.1, to=2.0, resolution=0.1, orient=tk.HORIZONTAL,
-                variable=self.pir_idle_speed, length=80, font=('Arial', 7),
-                bg='#E8E8FF', highlightthickness=0).pack(side=tk.LEFT)
-        
-        # ACTIVE state card
-        active_card = tk.LabelFrame(pir_states_frame, text="⚡ ACTIVE", 
-                                    bg='#E8FFE8', fg='#336633',
-                                    font=('Arial', 9, 'bold'))
+        active_card, self.pir_active_listbox = create_state_card(
+            pir_states_frame, "ACTIVE", self.pir_active_recordings, 'active')
         active_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
         
-        tk.Label(active_card, text="Recording:", bg='#E8FFE8', 
-                fg=self.colors['text_main'], font=('Arial', 8)).pack(anchor=tk.W, padx=5)
-        self.pir_active_combo = ttk.Combobox(active_card, width=15, state='readonly')
-        self.pir_active_combo.pack(padx=5, pady=2)
-        self.pir_active_combo.bind('<<ComboboxSelected>>', 
-            lambda e: self.pir_active_recording.set(self.pir_active_combo.get() if self.pir_active_combo.current() > 0 else ""))
-        
-        speed_frame2 = tk.Frame(active_card, bg='#E8FFE8')
-        speed_frame2.pack(fill=tk.X, padx=5, pady=2)
-        tk.Label(speed_frame2, text="Speed:", bg='#E8FFE8', 
-                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT)
-        tk.Scale(speed_frame2, from_=0.1, to=3.0, resolution=0.1, orient=tk.HORIZONTAL,
-                variable=self.pir_active_speed, length=80, font=('Arial', 7),
-                bg='#E8FFE8', highlightthickness=0).pack(side=tk.LEFT)
-        
-        # SLEEP state card
-        sleep_card = tk.LabelFrame(pir_states_frame, text="💤 SLEEP", 
-                                   bg='#F0E8FF', fg='#663366',
-                                   font=('Arial', 9, 'bold'))
+        sleep_card, self.pir_sleep_listbox = create_state_card(
+            pir_states_frame, "SLEEP", self.pir_sleep_recordings, 'sleep')
         sleep_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0))
         
-        tk.Label(sleep_card, text="Recording:", bg='#F0E8FF', 
-                fg=self.colors['text_main'], font=('Arial', 8)).pack(anchor=tk.W, padx=5)
-        self.pir_sleep_combo = ttk.Combobox(sleep_card, width=15, state='readonly')
-        self.pir_sleep_combo.pack(padx=5, pady=2)
-        self.pir_sleep_combo.bind('<<ComboboxSelected>>', 
-            lambda e: self.pir_sleep_recording.set(self.pir_sleep_combo.get() if self.pir_sleep_combo.current() > 0 else ""))
-        
-        speed_frame3 = tk.Frame(sleep_card, bg='#F0E8FF')
-        speed_frame3.pack(fill=tk.X, padx=5, pady=2)
-        tk.Label(speed_frame3, text="Speed:", bg='#F0E8FF', 
-                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT)
-        tk.Scale(speed_frame3, from_=0.1, to=1.0, resolution=0.1, orient=tk.HORIZONTAL,
-                variable=self.pir_sleep_speed, length=80, font=('Arial', 7),
-                bg='#F0E8FF', highlightthickness=0).pack(side=tk.LEFT)
-        
         # Timing row
-        pir_timing_frame = tk.Frame(pir_main_frame, bg='#FFE8E8')
+        pir_timing_frame = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
         pir_timing_frame.pack(fill=tk.X, padx=10, pady=(5, 10))
         
-        tk.Label(pir_timing_frame, text="Active duration:", bg='#FFE8E8', 
+        tk.Label(pir_timing_frame, text="Active duration:", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT)
         tk.Spinbox(pir_timing_frame, from_=5, to=120, width=4, 
                   textvariable=self.pir_active_duration, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
-        tk.Label(pir_timing_frame, text="sec", bg='#FFE8E8', 
+        tk.Label(pir_timing_frame, text="sec", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
         
-        tk.Label(pir_timing_frame, text="    Sleep after:", bg='#FFE8E8', 
+        tk.Label(pir_timing_frame, text="    Sleep after:", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(15, 0))
         tk.Spinbox(pir_timing_frame, from_=1, to=60, width=4, 
                   textvariable=self.pir_sleep_timeout, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
-        tk.Label(pir_timing_frame, text="min", bg='#FFE8E8', 
+        tk.Label(pir_timing_frame, text="min", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
         
-        tk.Label(pir_timing_frame, text="    Blend time:", bg='#FFE8E8', 
+        tk.Label(pir_timing_frame, text="    Blend time:", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(15, 0))
         tk.Spinbox(pir_timing_frame, from_=0.5, to=5.0, increment=0.5, width=4, 
                   textvariable=self.pir_transition_time, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
-        tk.Label(pir_timing_frame, text="sec", bg='#FFE8E8', 
+        tk.Label(pir_timing_frame, text="sec", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
+        
+        # Crossfade row (organic blending between recordings)
+        pir_crossfade_frame = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
+        pir_crossfade_frame.pack(fill=tk.X, padx=10, pady=(0, 8))
+        
+        self.pir_crossfade_cb = tk.Checkbutton(pir_crossfade_frame, text="Crossfade recordings", 
+                                               variable=self.pir_crossfade_enabled,
+                                               bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                                               font=('Arial', 8, 'bold'))
+        self.pir_crossfade_cb.pack(side=tk.LEFT)
+        
+        tk.Label(pir_crossfade_frame, text="  Interval:", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Spinbox(pir_crossfade_frame, from_=1, to=30, width=3, 
+                  textvariable=self.pir_crossfade_interval_min, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(pir_crossfade_frame, text="-", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT)
+        tk.Spinbox(pir_crossfade_frame, from_=1, to=60, width=3, 
+                  textvariable=self.pir_crossfade_interval_max, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(pir_crossfade_frame, text="sec", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
+        
+        tk.Label(pir_crossfade_frame, text="  Duration:", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Spinbox(pir_crossfade_frame, from_=1, to=15, width=3, 
+                  textvariable=self.pir_crossfade_duration_min, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(pir_crossfade_frame, text="-", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT)
+        tk.Spinbox(pir_crossfade_frame, from_=1, to=30, width=3, 
+                  textvariable=self.pir_crossfade_duration_max, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(pir_crossfade_frame, text="sec", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
+        
+        # Markov segment row (alternative to crossfade)
+        pir_markov_frame = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
+        pir_markov_frame.pack(fill=tk.X, padx=10, pady=(0, 8))
+        
+        self.pir_markov_cb = tk.Checkbutton(pir_markov_frame, text="Markov segments", 
+                                            variable=self.pir_markov_enabled,
+                                            command=self._on_markov_toggle,
+                                            bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                                            font=('Arial', 8, 'bold'))
+        self.pir_markov_cb.pack(side=tk.LEFT)
+        
+        tk.Label(pir_markov_frame, text="  Seg:", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Spinbox(pir_markov_frame, from_=0.3, to=3.0, increment=0.1, width=4, 
+                  textvariable=self.pir_markov_segment_length, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(pir_markov_frame, text="s", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
+        
+        tk.Label(pir_markov_frame, text="  Chaos:", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Scale(pir_markov_frame, from_=0, to=100, orient=tk.HORIZONTAL, length=80,
+                variable=self.pir_markov_chaos, showvalue=False,
+                bg=self.colors['bg_frame'], highlightthickness=0).pack(side=tk.LEFT, padx=1)
+        tk.Label(pir_markov_frame, text="  Seg Blend:", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(5, 0))
+        tk.Spinbox(pir_markov_frame, from_=0.0, to=1.0, increment=0.05, width=4, 
+                  textvariable=self.pir_markov_blend_time, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(pir_markov_frame, text="s", bg=self.colors['bg_frame'], 
+                fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
+        
+        # Hardware preview toggle
+        tk.Checkbutton(pir_markov_frame, text="HW Preview", variable=self.pir_markov_hardware_preview,
+                      bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                      selectcolor=self.colors['bg_dark'], font=('Arial', 8),
+                      activebackground=self.colors['bg_frame']).pack(side=tk.LEFT, padx=(15, 0))
+        
+        # Markov info row (shows segment details and size estimation)
+        pir_markov_info_frame = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
+        pir_markov_info_frame.pack(fill=tk.X, padx=10, pady=(0, 8))
+        
+        self.pir_markov_info_label = tk.Label(pir_markov_info_frame, text="",
+                                              bg=self.colors['bg_frame'], 
+                                              fg=self.colors['text_dim'],
+                                              font=('Consolas', 8), anchor='w', justify='left')
+        self.pir_markov_info_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
         # ==================== END PIR PANEL ====================
         
@@ -732,17 +905,26 @@ class SimpleHandControl:
         self.layer_info_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
         # Keyframe control buttons
-        ctk.CTkButton(layer_bottom, text="📸→📦 Keyframes to Layer", 
+        ctk.CTkButton(layer_bottom, text="Keyframes to Layer", 
                  command=self.convert_keyframes_to_layer,
-                 font=('Arial', 10), width=150).pack(side=tk.RIGHT, padx=2)
+                 font=('Arial', 10), width=130,
+                 fg_color='#c0c0c0', text_color='black',
+                 hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.RIGHT, padx=2)
         
         ctk.CTkButton(layer_bottom, text="Clear Keyframes", 
                  command=self.clear_keyframes,
-                 font=('Arial', 10), width=110).pack(side=tk.RIGHT, padx=2)
+                 font=('Arial', 10), width=110,
+                 fg_color='#c0c0c0', text_color='black',
+                 hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.RIGHT, padx=2)
         
         ctk.CTkButton(layer_bottom, text="Delete Selected", 
                  command=self.delete_selected_layer,
-                 font=('Arial', 10), width=110).pack(side=tk.RIGHT)
+                 font=('Arial', 10), width=110,
+                 fg_color='#c0c0c0', text_color='black',
+                 hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.RIGHT)
     
     def create_servo_sliders(self):
         """Create single-servo control interface."""
@@ -773,10 +955,16 @@ class SimpleHandControl:
         # Preset controls (global)
         preset_row = tk.Frame(self.servo_frame, bg=self.colors['bg_frame'])
         preset_row.pack(fill=tk.X, padx=10, pady=(0, 10))
-        ctk.CTkButton(preset_row, text="💾 Save Preset", command=self.save_servo_preset,
-                 font=('Arial', 10), width=100).pack(side=tk.LEFT, padx=(0, 5))
-        ctk.CTkButton(preset_row, text="📂 Load Preset", command=self.load_servo_preset,
-                 font=('Arial', 10), width=100).pack(side=tk.LEFT)
+        ctk.CTkButton(preset_row, text="Save Preset", command=self.save_servo_preset,
+                 font=('Arial', 10), width=100,
+                 fg_color='#c0c0c0', text_color='black',
+                 hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=(0, 5))
+        ctk.CTkButton(preset_row, text="Load Preset", command=self.load_servo_preset,
+                 font=('Arial', 10), width=100,
+                 fg_color='#c0c0c0', text_color='black',
+                 hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT)
         
         # Large control bar
         control_frame = tk.Frame(self.servo_frame, bg=self.colors['bg_frame'])
@@ -1723,6 +1911,14 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             print(f"▶️ Auto-playing {len(self.recorded_layers)} existing layers")
         
         self.record_btn.configure(text="⏹️ Stop", fg_color=self.colors['accent_red'])
+        
+        # Show recording indicator on canvas
+        if hasattr(self, 'rec_indicator_bg'):
+            self.canvas.itemconfig(self.rec_indicator_bg, state='normal')
+            self.canvas.itemconfig(self.rec_indicator_dot, state='normal')
+            self.canvas.itemconfig(self.rec_indicator_text, state='normal')
+            self.blink_recording_indicator()
+        
         print("🔴 Started layer recording...")
     
     def stop_recording(self):
@@ -1748,7 +1944,27 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
                 print(f"⏱️ First layer sets loop duration: {layer['duration']:.2f}s (all future layers constrained to this time)")
         
         self.record_btn.configure(text="🔴 Record", fg_color=self.default_button_color)
+        
+        # Hide recording indicator
+        if hasattr(self, 'rec_indicator_bg'):
+            self.canvas.itemconfig(self.rec_indicator_bg, state='hidden')
+            self.canvas.itemconfig(self.rec_indicator_dot, state='hidden')
+            self.canvas.itemconfig(self.rec_indicator_text, state='hidden')
+        
         self.update_layer_list()
+    
+    def blink_recording_indicator(self):
+        """Blink the recording indicator while recording."""
+        if not self.layer_recording or not hasattr(self, 'rec_indicator_dot'):
+            return
+        
+        # Toggle visibility of the dot for blink effect
+        current_state = self.canvas.itemcget(self.rec_indicator_dot, 'state')
+        new_state = 'hidden' if current_state == 'normal' else 'normal'
+        self.canvas.itemconfig(self.rec_indicator_dot, state=new_state)
+        
+        # Schedule next blink
+        self.root.after(500, self.blink_recording_indicator)
     
     def toggle_playback(self):
         """Toggle playback of ALL recorded layers simultaneously."""
@@ -1839,9 +2055,25 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         """Apply hardware config from UI and save to file."""
         self.update_config_from_ui()
         self.save_hardware_config()
+        
+        # Reinitialize hand controller with new settings
+        if HAND_CONTROLLER_AVAILABLE and self.hand_controller:
+            try:
+                old_port = self.hand_controller.serial_connection.port if self.hand_controller.serial_connection else self.default_port
+                self.hand_controller.serial_connection.close()
+                self.hand_controller = HandExpressionController(
+                    port=old_port,
+                    clean_output=True,
+                    min_angle=self.hardware_config['global_min_angle'],
+                    max_angle=self.hardware_config['global_max_angle']
+                )
+                print(f"✅ Controller reinitialized with range {self.hardware_config['global_min_angle']}-{self.hardware_config['global_max_angle']}°")
+            except Exception as e:
+                print(f"⚠️ Could not reinitialize controller: {e}")
+        
         tkinter.messagebox.showinfo("Config Saved", 
-            f"Hardware config '{self.hardware_config['name']}' saved.\n\n"
-            f"These settings will be used in exported .ino sketches:\n"
+            f"Hardware config '{self.hardware_config['name']}' saved and applied.\n\n"
+            f"Settings now active:\n"
             f"• Angle range: {self.hardware_config['global_min_angle']}° - {self.hardware_config['global_max_angle']}°\n"
             f"• Reversed servos: {self.hardware_config['reversed_servos']}\n"
             f"• Serial port: {self.hardware_config['serial_port']}")
@@ -1984,10 +2216,28 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             print(f"❌ Failed to load PIR recording {name}: {e}")
             return None
     
-    def update_pir_recording_combos(self):
-        """Update the PIR state recording dropdowns with library recordings."""
-        # Build options: None, Current Recording (if loaded), then library files
-        recordings = ['(None)']
+    def get_pir_state_recordings_list(self, state):
+        """Get the recordings list for a given PIR state."""
+        lists = {
+            'idle': self.pir_idle_recordings,
+            'active': self.pir_active_recordings,
+            'sleep': self.pir_sleep_recordings
+        }
+        return lists.get(state, [])
+    
+    def get_pir_state_listbox(self, state):
+        """Get the listbox widget for a given PIR state."""
+        listboxes = {
+            'idle': self.pir_idle_listbox,
+            'active': self.pir_active_listbox,
+            'sleep': self.pir_sleep_listbox
+        }
+        return listboxes.get(state)
+    
+    def add_pir_recording(self, state, listbox):
+        """Show popup menu to add a recording to a PIR state."""
+        # Build options list
+        recordings = []
         
         # Add current recording option if layers are loaded
         if self.recorded_layers:
@@ -1996,19 +2246,72 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         # Add saved library recordings
         recordings.extend(self.scan_pir_recordings_library())
         
-        # Update all three combos
-        for combo, var in [(self.pir_idle_combo, self.pir_idle_recording),
-                          (self.pir_active_combo, self.pir_active_recording),
-                          (self.pir_sleep_combo, self.pir_sleep_recording)]:
-            current = var.get()
-            combo['values'] = recordings
+        if not recordings:
+            tkinter.messagebox.showinfo("No Recordings", 
+                "No recordings available. Record a movement or save to the PIR library first.")
+            return
+        
+        # Create popup menu
+        menu = tk.Menu(self.root, tearoff=0)
+        for rec in recordings:
+            menu.add_command(label=rec, 
+                command=lambda r=rec, s=state, lb=listbox: self._do_add_pir_recording(s, lb, r))
+        
+        # Show menu at button position
+        try:
+            menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+        finally:
+            menu.grab_release()
+    
+    def _do_add_pir_recording(self, state, listbox, recording_name):
+        """Actually add the recording to the state's list."""
+        # Get the right list
+        if state == 'idle':
+            rec_list = self.pir_idle_recordings
+        elif state == 'active':
+            rec_list = self.pir_active_recordings
+        else:
+            rec_list = self.pir_sleep_recordings
+        
+        # Avoid duplicates
+        if recording_name not in rec_list:
+            rec_list.append(recording_name)
+            listbox.insert(tk.END, recording_name)
+            print(f"➕ Added '{recording_name}' to {state.upper()} state")
             
-            # Restore selection if still valid
-            if current and current in recordings:
-                combo.set(current)
-            else:
-                combo.current(0)
-                var.set("")
+            # Rebuild Markov segments if Markov mode is enabled
+            if self.pir_markov_enabled.get():
+                self._rebuild_markov_segments()
+    
+    def remove_pir_recording(self, state, listbox):
+        """Remove selected recording from a PIR state."""
+        selection = listbox.curselection()
+        if not selection:
+            return
+        
+        idx = selection[0]
+        recording_name = listbox.get(idx)
+        
+        # Get the right list
+        if state == 'idle':
+            rec_list = self.pir_idle_recordings
+        elif state == 'active':
+            rec_list = self.pir_active_recordings
+        else:
+            rec_list = self.pir_sleep_recordings
+        
+        if recording_name in rec_list:
+            rec_list.remove(recording_name)
+            listbox.delete(idx)
+            print(f"➖ Removed '{recording_name}' from {state.upper()} state")
+            
+            # Rebuild Markov segments if Markov mode is enabled
+            if self.pir_markov_enabled.get():
+                self._rebuild_markov_segments()
+    
+    def update_pir_recording_combos(self):
+        """Legacy compatibility - now a no-op since we use listboxes."""
+        pass  # Listboxes are updated directly via add/remove
     
     def on_pir_toggle(self):
         """Toggle PIR testing mode."""
@@ -2019,6 +2322,13 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             self.pir_last_motion_time = time.time()  # Start fresh
             self.pir_simulate_btn.configure(state='normal')
             self.update_pir_state_display()
+            
+            # Initialize crossfade system
+            self._schedule_next_crossfade()
+            
+            # Initialize Markov if enabled
+            if self.pir_markov_enabled.get():
+                self._rebuild_markov_segments()
             
             # Start PIR playback if we have recordings assigned
             if not self.is_playing:
@@ -2031,6 +2341,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             self.pir_state = 'idle'
             self.pir_simulate_btn.configure(state='disabled')
             self.pir_state_label.config(text="OFF", bg='#888888')
+            self.pir_rec_label.config(text="")
             self.pir_timer_label.config(text="")
             print("⚪ PIR Mode disabled")
     
@@ -2079,8 +2390,8 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             print(f"👋 Motion! {self.pir_previous_state} → ACTIVE")
             
             # Flash the simulate button briefly to show activity
-            self.pir_simulate_btn.configure(fg_color='#FF6600')
-            self.root.after(200, lambda: self.pir_simulate_btn.configure(fg_color='#FFB366'))
+            self.pir_simulate_btn.configure(fg_color='#808080')
+            self.root.after(200, lambda: self.pir_simulate_btn.configure(fg_color='#c0c0c0'))
         
         self.update_pir_state_display()
     
@@ -2149,6 +2460,12 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         # Update display if state changed
         if old_state != self.pir_state:
             self.update_pir_state_display()
+            # Reset crossfade timing for new state
+            self._schedule_next_crossfade()
+        
+        # Handle recording crossfade within state (if enabled and multiple recordings)
+        if self.pir_crossfade_enabled.get():
+            self._update_recording_crossfade(current_time)
         
         # Update timer display
         self.update_pir_timer_display(time_since_motion, time_in_state)
@@ -2162,6 +2479,54 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         }
         color, text = state_colors.get(self.pir_state, ('#888888', 'OFF'))
         self.pir_state_label.config(text=text, bg=color)
+        
+        # Check if Markov mode is active
+        if self.pir_markov_enabled.get() and self.pir_markov_initialized:
+            segments = self.pir_markov_segments.get(self.pir_state, [])
+            if segments:
+                seg_idx = self.pir_current_segment_idx
+                total = len(segments)
+                # Get source recording name for current segment
+                if seg_idx < len(segments):
+                    seg = segments[seg_idx]
+                    rec_name = seg.get('recording_name', f"rec{seg['recording']}")
+                    seg_num = seg.get('segment_idx', 0) + 1  # 1-based for display
+                    self.pir_rec_label.config(text=f"[Seg {seg_idx+1}/{total} from '{rec_name}' #{seg_num}]")
+                else:
+                    self.pir_rec_label.config(text=f"[Markov seg {seg_idx+1}/{total}]")
+            else:
+                self.pir_rec_label.config(text="[Markov: no segments]")
+            return
+        
+        # Update recording indicator with actual recording name
+        rec_idx = self.pir_recording_index.get(self.pir_state, 0)
+        rec_lists = {
+            'idle': self.pir_idle_recordings,
+            'active': self.pir_active_recordings,
+            'sleep': self.pir_sleep_recordings
+        }
+        rec_list = rec_lists.get(self.pir_state, [])
+        if rec_list and len(rec_list) > 0 and rec_idx < len(rec_list):
+            # Show the actual recording name
+            rec_name = rec_list[rec_idx]
+            # Remove .json extension if present for cleaner display
+            if rec_name.endswith('.json'):
+                rec_name = rec_name[:-5]
+            
+            # Show crossfade indicator if actively crossfading
+            if self.pir_is_crossfading and hasattr(self, 'pir_crossfade_target_idx'):
+                target_idx = self.pir_crossfade_target_idx
+                if target_idx < len(rec_list):
+                    target_name = rec_list[target_idx]
+                    if target_name.endswith('.json'):
+                        target_name = target_name[:-5]
+                    self.pir_rec_label.config(text=f"({rec_name} → {target_name})")
+                else:
+                    self.pir_rec_label.config(text=f"({rec_name})")
+            else:
+                self.pir_rec_label.config(text=f"({rec_name})")
+        else:
+            self.pir_rec_label.config(text="")
     
     def update_pir_timer_display(self, time_since_motion, time_in_state):
         """Update the timer display in PIR panel."""
@@ -2174,30 +2539,606 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         elif self.pir_state == 'sleep':
             self.pir_timer_label.config(text="💤 Sleeping...")
     
-    def get_pir_playback_speed(self):
-        """Get the playback speed for the current PIR state."""
-        speeds = {
-            'idle': self.pir_idle_speed.get(),
-            'active': self.pir_active_speed.get(),
-            'sleep': self.pir_sleep_speed.get()
+    def _schedule_next_crossfade(self):
+        """Schedule the next crossfade at a random interval."""
+        import random
+        interval_min = self.pir_crossfade_interval_min.get()
+        interval_max = self.pir_crossfade_interval_max.get()
+        interval = random.uniform(interval_min, interval_max)
+        self.pir_next_crossfade_time = time.time() + interval
+        self.pir_is_crossfading = False
+        self.pir_rec_blend_factor = 0.0
+    
+    def _update_recording_crossfade(self, current_time):
+        """Update the recording crossfade system (mirrors Arduino behavior).
+        
+        This keeps two recording indices (A=current, B=target) and crossfades between them.
+        When crossfade completes, A becomes B and a new B is picked.
+        """
+        import random
+        
+        # Get recording list for current state
+        rec_lists = {
+            'idle': self.pir_idle_recordings,
+            'active': self.pir_active_recordings,
+            'sleep': self.pir_sleep_recordings
+        }
+        rec_list = rec_lists.get(self.pir_state, [])
+        
+        # Need at least 2 recordings to crossfade
+        if len(rec_list) < 2:
+            return
+        
+        # Check if we should start a new crossfade
+        if not self.pir_is_crossfading and current_time >= self.pir_next_crossfade_time:
+            # Start crossfade
+            self.pir_is_crossfading = True
+            self.pir_crossfade_start_time = current_time
+            
+            # Random duration within configured range
+            dur_min = self.pir_crossfade_duration_min.get()
+            dur_max = self.pir_crossfade_duration_max.get()
+            self.pir_crossfade_duration = random.uniform(dur_min, dur_max)
+            
+            # Pick a new target recording different from current
+            current_idx = self.pir_recording_index.get(self.pir_state, 0)
+            available = [i for i in range(len(rec_list)) if i != current_idx]
+            if available:
+                self.pir_crossfade_target_idx = random.choice(available)
+            else:
+                self.pir_crossfade_target_idx = current_idx
+            
+            # Store current positions for blending
+            self.pir_prev_rec_positions = {
+                'fingers': self.finger_positions[:],
+                'arm': self.arm_positions[:]
+            }
+            
+            target_name = rec_list[self.pir_crossfade_target_idx]
+            if target_name.endswith('.json'):
+                target_name = target_name[:-5]
+            print(f"🔀 Starting crossfade to: {target_name} (over {self.pir_crossfade_duration:.1f}s)")
+            
+            # Update display to show crossfade in progress
+            self.update_pir_state_display()
+        
+        # Update crossfade progress
+        if self.pir_is_crossfading:
+            elapsed = current_time - self.pir_crossfade_start_time
+            if elapsed >= self.pir_crossfade_duration:
+                # Crossfade complete - switch to target recording
+                self.pir_recording_index[self.pir_state] = self.pir_crossfade_target_idx
+                self.pir_rec_blend_factor = 0.0
+                self.pir_is_crossfading = False
+                self.update_pir_state_display()
+                
+                # Schedule next crossfade
+                self._schedule_next_crossfade()
+                
+                rec_name = rec_list[self.pir_crossfade_target_idx]
+                if rec_name.endswith('.json'):
+                    rec_name = rec_name[:-5]
+                print(f"✅ Crossfade complete, now playing: {rec_name}")
+            else:
+                # Very smooth ease-in-out crossfade factor (smootherstep - barely noticeable)
+                t = elapsed / self.pir_crossfade_duration
+                # Smootherstep (Ken Perlin) - much gentler than smoothstep
+                self.pir_rec_blend_factor = t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+    
+    def _on_markov_toggle(self):
+        """Handle toggling Markov mode on/off."""
+        print(f"[MARKOV] toggle: enabled={self.pir_markov_enabled.get()}")
+        if self.pir_markov_enabled.get():
+            # Disable crossfade when Markov is enabled
+            self.pir_crossfade_enabled.set(False)
+            # Build Markov segments for current state
+            print(f"  IDLE recordings: {self.pir_idle_recordings}")
+            print(f"  ACTIVE recordings: {self.pir_active_recordings}")
+            print(f"  SLEEP recordings: {self.pir_sleep_recordings}")
+            self._rebuild_markov_segments()
+            print("[MARKOV] Segment mode enabled")
+        else:
+            print("[MARKOV] Disabled, crossfade available")
+            # Clear info display
+            if hasattr(self, 'pir_markov_info_label'):
+                self.pir_markov_info_label.config(text="")
+    
+    def _rebuild_markov_segments(self):
+        """Build segment pool and transition matrix from all PIR recordings."""
+        import random
+        
+        self.pir_markov_segments = {'idle': [], 'active': [], 'sleep': []}
+        self.pir_markov_transitions = {'idle': [], 'active': [], 'sleep': []}
+        
+        rec_map = {
+            'idle': self.pir_idle_recordings,
+            'active': self.pir_active_recordings,
+            'sleep': self.pir_sleep_recordings
         }
         
-        # Blend between previous and current state speed during transitions
-        if self.pir_blend_factor < 1.0 and self.pir_previous_state:
-            prev_speed = speeds.get(self.pir_previous_state, 1.0)
-            curr_speed = speeds.get(self.pir_state, 1.0)
-            return prev_speed + (curr_speed - prev_speed) * self.pir_blend_factor
+        segment_length = self.pir_markov_segment_length.get()
+        print(f"[MARKOV] Building segments (segment_length={segment_length}s)...")
         
-        return speeds.get(self.pir_state, 1.0)
+        for state_name, rec_list in rec_map.items():
+            all_segments = []
+            print(f"  {state_name.upper()}: {len(rec_list)} recordings to process")
+            
+            for rec_idx, rec_name in enumerate(rec_list):
+                layers = self.load_pir_recording(rec_name)
+                if not layers:
+                    print(f"    [WARN] Failed to load '{rec_name}'")
+                    continue
+                
+                print(f"    Loaded '{rec_name}': {len(layers)} layers")
+                
+                # Get the merged timeline from all layers
+                merged = self._merge_layers_to_samples(layers, sample_rate=50)  # 50Hz
+                if not merged:
+                    print(f"    [WARN] '{rec_name}' produced no samples")
+                    continue
+                
+                print(f"    Merged to {len(merged)} samples ({len(merged)/50:.1f}s)")
+                
+                # Chop into segments
+                samples_per_segment = int(segment_length * 50)
+                num_segments = len(merged) // samples_per_segment
+                
+                for seg_idx in range(num_segments):
+                    start_idx = seg_idx * samples_per_segment
+                    end_idx = start_idx + samples_per_segment
+                    segment_data = merged[start_idx:end_idx]
+                    
+                    if len(segment_data) < samples_per_segment:
+                        continue
+                    
+                    # Randomize duration with bias toward longer (1.2-3.0s, biased toward 1.8-2.5s)
+                    # Using triangular distribution: min=1.2, mode=2.0, max=3.0
+                    import random
+                    random_duration = random.triangular(1.2, 3.0, 2.0)
+                    
+                    all_segments.append({
+                        'recording': rec_idx,
+                        'recording_name': rec_name,  # Store actual name for display
+                        'segment_idx': seg_idx,
+                        'data': segment_data,
+                        'start_positions': segment_data[0],
+                        'end_positions': segment_data[-1],
+                        'duration': random_duration  # Variable duration per segment
+                    })
+            
+            self.pir_markov_segments[state_name] = all_segments
+            
+            # Build transition matrix based on position similarity
+            if len(all_segments) > 1:
+                self.pir_markov_transitions[state_name] = self._build_transition_matrix(all_segments)
+            else:
+                self.pir_markov_transitions[state_name] = []
+        
+        # Build hardware-equivalent segments and sparse transitions for preview
+        self._build_hardware_preview_data()
+        
+        total = sum(len(segs) for segs in self.pir_markov_segments.values())
+        print(f"[MARKOV] Built {total} segments (idle:{len(self.pir_markov_segments['idle'])}, "
+              f"active:{len(self.pir_markov_segments['active'])}, sleep:{len(self.pir_markov_segments['sleep'])})")
+        
+        self.pir_markov_initialized = True
+        self.pir_current_segment_idx = 0
+        self.pir_segment_start_time = time.time()
+        self.pir_prev_segment_end_positions = None
+        self.pir_needs_blend = False
+        
+        # Update info display
+        self._update_markov_info_display()
+    
+    def _update_markov_info_display(self):
+        """Update the Markov info label with segment counts and size estimation."""
+        if not hasattr(self, 'pir_markov_info_label'):
+            return
+        
+        total_segs = sum(len(segs) for segs in self.pir_markov_segments.values())
+        if total_segs == 0:
+            self.pir_markov_info_label.config(text="No segments built")
+            return
+        
+        # Count segments per recording
+        rec_counts = {}  # {rec_name: count}
+        for state_name, segments in self.pir_markov_segments.items():
+            for seg in segments:
+                rec_name = seg.get('recording_name', f"rec{seg['recording']}")
+                if rec_name not in rec_counts:
+                    rec_counts[rec_name] = {'idle': 0, 'active': 0, 'sleep': 0}
+                rec_counts[rec_name][state_name] += 1
+        
+        # Calculate Arduino memory size
+        # Arduino export uses: 12 samples/segment × 8 servos = 96 bytes/segment
+        # Plus sparse transitions: 4 transitions × 2 bytes = 8 bytes/segment
+        # Total: 104 bytes per segment
+        samples_per_seg = 12  # Matches export
+        bytes_per_segment = samples_per_seg * 8 + 8  # data + sparse transitions
+        total_bytes = total_segs * bytes_per_segment
+        total_kb = total_bytes / 1024
+        
+        # Format info text
+        segment_length = self.pir_markov_segment_length.get()
+        lines = []
+        lines.append(f"Segments: {total_segs} ({segment_length}s each, {samples_per_seg} samples)")
+        
+        # Per-recording breakdown
+        for rec_name, counts in rec_counts.items():
+            parts = []
+            if counts['idle'] > 0:
+                parts.append(f"I:{counts['idle']}")
+            if counts['active'] > 0:
+                parts.append(f"A:{counts['active']}")
+            if counts['sleep'] > 0:
+                parts.append(f"S:{counts['sleep']}")
+            lines.append(f"  {rec_name}: {' '.join(parts)}")
+        
+        # Size estimation (more accurate now)
+        if total_kb > 25:
+            lines.append(f"Arduino: ~{total_kb:.1f}KB [!] Near 30KB limit")
+        else:
+            lines.append(f"Arduino: ~{total_kb:.1f}KB (limit ~30KB)")
+        
+        self.pir_markov_info_label.config(text="\n".join(lines))
+    
+    def _merge_layers_to_samples(self, layers, sample_rate=50):
+        """Merge multiple layers into a single sample array at fixed rate."""
+        if not layers:
+            print("    [MERGE] no layers provided")
+            return []
+        
+        # Find max duration
+        durations = [layer.get('duration', 0) for layer in layers]
+        max_duration = max(durations) if durations else 0
+        
+        if max_duration <= 0:
+            print(f"    [MERGE] max_duration is {max_duration}")
+            return []
+        
+        num_samples = int(max_duration * sample_rate)
+        print(f"    [MERGE] max_duration={max_duration:.2f}s, num_samples={num_samples}")
+        
+        if num_samples <= 0:
+            return []
+        
+        # Initialize with None
+        samples = []
+        
+        for sample_idx in range(num_samples):
+            t = sample_idx / sample_rate
+            positions = [90] * 8  # Default center
+            
+            for layer in layers:
+                data = layer.get('data', [])
+                if not data:
+                    continue
+                
+                duration = layer.get('duration', 1.0)
+                layer_t = t * (duration / max_duration) if max_duration > 0 else 0
+                
+                # Find surrounding keyframes
+                prev_point = data[0]
+                next_point = data[-1]
+                for i, point in enumerate(data):
+                    if point['time'] >= layer_t:
+                        next_point = point
+                        prev_point = data[max(0, i - 1)]
+                        break
+                
+                # Interpolate
+                time_diff = next_point['time'] - prev_point['time']
+                if time_diff > 0:
+                    factor = (layer_t - prev_point['time']) / time_diff
+                    factor = max(0, min(1, factor))
+                else:
+                    factor = 0
+                
+                # Apply finger positions
+                for finger_idx in range(5):
+                    prev_fingers = prev_point.get('finger_positions', [])
+                    next_fingers = next_point.get('finger_positions', [])
+                    if finger_idx < len(prev_fingers) and finger_idx < len(next_fingers):
+                        pv = prev_fingers[finger_idx]
+                        nv = next_fingers[finger_idx]
+                        if pv is not None and nv is not None:
+                            positions[finger_idx] = pv + (nv - pv) * factor
+                
+                # Apply arm positions
+                for arm_idx in range(3):
+                    prev_arm = prev_point.get('arm_positions', [])
+                    next_arm = next_point.get('arm_positions', [])
+                    if arm_idx < len(prev_arm) and arm_idx < len(next_arm):
+                        pv = prev_arm[arm_idx]
+                        nv = next_arm[arm_idx]
+                        if pv is not None and nv is not None:
+                            positions[5 + arm_idx] = pv + (nv - pv) * factor
+            
+            samples.append(positions)
+        
+        return samples
+    
+    def _build_transition_matrix(self, segments):
+        """Build probability matrix based on position similarity between segment ends and starts."""
+        import math
+        
+        num_segments = len(segments)
+        chaos = self.pir_markov_chaos.get() / 100.0  # 0.0 to 1.0
+        
+        # Calculate similarity scores between all pairs
+        # similarity = how similar segment[i].end is to segment[j].start
+        matrix = []
+        
+        for i in range(num_segments):
+            end_pos = segments[i]['end_positions']
+            probs = []
+            
+            for j in range(num_segments):
+                if i == j:
+                    # Small chance to repeat same segment
+                    probs.append(0.05)
+                    continue
+                
+                start_pos = segments[j]['start_positions']
+                
+                # Calculate distance (sum of squared differences)
+                dist = 0
+                for k in range(8):
+                    diff = end_pos[k] - start_pos[k]
+                    dist += diff * diff
+                dist = math.sqrt(dist)
+                
+                # Convert distance to similarity (closer = higher)
+                # Max distance ~ 180*sqrt(8) ~ 509
+                similarity = max(0, 1 - (dist / 200))
+                
+                # Mix similarity with uniform random based on chaos setting
+                # chaos=0: pure similarity, chaos=1: pure random
+                uniform = 1.0 / (num_segments - 1)
+                prob = (1 - chaos) * similarity + chaos * uniform
+                probs.append(prob)
+            
+            # Normalize to sum to 1
+            total = sum(probs)
+            if total > 0:
+                probs = [p / total for p in probs]
+            else:
+                probs = [1.0 / num_segments] * num_segments
+            
+            matrix.append(probs)
+        
+        return matrix
+    
+    def _build_hardware_preview_data(self):
+        """Build hardware-equivalent segments and sparse transitions for accurate preview.
+        
+        This creates the exact same data that gets exported to Arduino:
+        - Segments subsampled to HARDWARE_SAMPLES_PER_SEG (12) points
+        - Transitions limited to top HARDWARE_TOP_K_TRANSITIONS (6) with byte probabilities
+        """
+        self.pir_markov_hw_segments = {'idle': [], 'active': [], 'sleep': []}
+        self.pir_markov_hw_transitions = {'idle': [], 'active': [], 'sleep': []}
+        
+        for state_name in ['idle', 'active', 'sleep']:
+            full_segments = self.pir_markov_segments.get(state_name, [])
+            full_transitions = self.pir_markov_transitions.get(state_name, [])
+            
+            if not full_segments:
+                continue
+            
+            # Subsample each segment to hardware resolution
+            hw_segs = []
+            for seg in full_segments:
+                full_data = seg['data']
+                num_samples = len(full_data)
+                
+                # Subsample to HARDWARE_SAMPLES_PER_SEG points
+                hw_data = []
+                for i in range(self.HARDWARE_SAMPLES_PER_SEG):
+                    # Calculate source index (same logic as Arduino export)
+                    src_idx = int(i * (num_samples - 1) / (self.HARDWARE_SAMPLES_PER_SEG - 1))
+                    src_idx = min(src_idx, num_samples - 1)
+                    hw_data.append(full_data[src_idx][:])  # Copy the positions
+                
+                hw_segs.append({
+                    'data': hw_data,
+                    'duration': seg['duration'],
+                    'recording_name': seg.get('recording_name', ''),
+                    'start_positions': hw_data[0],
+                    'end_positions': hw_data[-1]
+                })
+            
+            self.pir_markov_hw_segments[state_name] = hw_segs
+            
+            # Build sparse top-K transitions (same as Arduino export)
+            if full_transitions:
+                sparse_trans = []
+                for i, probs in enumerate(full_transitions):
+                    # Get indices sorted by probability
+                    indexed_probs = [(idx, p) for idx, p in enumerate(probs)]
+                    indexed_probs.sort(key=lambda x: x[1], reverse=True)
+                    
+                    # Take top K
+                    top_k = indexed_probs[:self.HARDWARE_TOP_K_TRANSITIONS]
+                    
+                    # Normalize probabilities to sum to 1.0
+                    total = sum(p for _, p in top_k)
+                    if total > 0:
+                        normalized = [(idx, p / total) for idx, p in top_k]
+                    else:
+                        # Fallback: uniform among top K
+                        normalized = [(idx, 1.0 / len(top_k)) for idx, _ in top_k]
+                    
+                    sparse_trans.append(normalized)  # List of (index, probability) tuples
+                
+                self.pir_markov_hw_transitions[state_name] = sparse_trans
+        
+        print(f"[MARKOV] Hardware preview data built (samples/seg={self.HARDWARE_SAMPLES_PER_SEG}, top-K={self.HARDWARE_TOP_K_TRANSITIONS})")
+
+    def _markov_pick_next_segment(self, state):
+        """Pick the next segment using Markov transition probabilities."""
+        import random
+        
+        segments = self.pir_markov_segments.get(state, [])
+        if not segments or self.pir_current_segment_idx >= len(segments):
+            return 0
+        
+        # Use sparse transitions when hardware preview is enabled
+        if self.pir_markov_hardware_preview.get():
+            sparse_transitions = self.pir_markov_hw_transitions.get(state, [])
+            if sparse_transitions and self.pir_current_segment_idx < len(sparse_transitions):
+                # Sparse format: list of (index, probability) tuples
+                trans = sparse_transitions[self.pir_current_segment_idx]
+                r = random.random()
+                cumulative = 0
+                for idx, prob in trans:
+                    cumulative += prob
+                    if r <= cumulative:
+                        return idx
+                # Fallback to first option
+                return trans[0][0] if trans else 0
+            return random.randint(0, len(segments) - 1)
+        
+        # Full transition matrix for non-hardware preview
+        transitions = self.pir_markov_transitions.get(state, [])
+        if not transitions:
+            return 0
+        
+        probs = transitions[self.pir_current_segment_idx]
+        
+        # Weighted random choice
+        r = random.random()
+        cumulative = 0
+        for idx, prob in enumerate(probs):
+            cumulative += prob
+            if r <= cumulative:
+                return idx
+        
+        return len(probs) - 1  # Fallback to last
+    
+    def _update_markov_playback(self, current_time):
+        """Update Markov segment playback (matches Arduino export exactly)."""
+        import random
+        
+        # Use hardware segments when hardware preview is enabled
+        use_hw = self.pir_markov_hardware_preview.get()
+        if use_hw:
+            segments = self.pir_markov_hw_segments.get(self.pir_state, [])
+        else:
+            segments = self.pir_markov_segments.get(self.pir_state, [])
+        
+        if not segments:
+            return None, None
+        
+        # Initialize if needed
+        if self.pir_current_segment_idx >= len(segments):
+            self.pir_current_segment_idx = 0
+            self.pir_segment_start_time = current_time
+        
+        current_seg = segments[self.pir_current_segment_idx]
+        segment_duration = current_seg['duration']
+        segment_elapsed = current_time - self.pir_segment_start_time
+        
+        # Check if segment is done
+        if segment_elapsed >= segment_duration:
+            # Store end positions for blending
+            self.pir_prev_segment_end_positions = current_seg['data'][-1][:]
+            
+            # Pick next segment
+            next_idx = self._markov_pick_next_segment(self.pir_state)
+            self.pir_current_segment_idx = next_idx
+            self.pir_segment_start_time = current_time
+            self.pir_needs_blend = True
+            segment_elapsed = 0
+            current_seg = segments[next_idx]
+            segment_duration = current_seg['duration']
+            # Update display
+            self.update_pir_state_display()
+        
+        # Calculate position within segment
+        progress = segment_elapsed / segment_duration if segment_duration > 0 else 1.0
+        num_samples = len(current_seg['data'])
+        
+        if use_hw:
+            # Hardware mode: interpolate between sparse samples
+            sample_float = progress * (num_samples - 1)
+            sample_idx = min(int(sample_float), num_samples - 2)
+            interp_factor = sample_float - sample_idx
+            
+            pos_a = current_seg['data'][sample_idx]
+            pos_b = current_seg['data'][sample_idx + 1]
+            positions = [pos_a[i] + (pos_b[i] - pos_a[i]) * interp_factor for i in range(8)]
+        else:
+            # Full-fidelity mode: direct sample lookup
+            sample_idx = min(int(progress * num_samples), num_samples - 1)
+            positions = current_seg['data'][sample_idx][:]
+        
+        # Blend from previous segment if needed
+        blend_time = self.pir_markov_blend_time.get()
+        if self.pir_needs_blend and segment_elapsed < blend_time and self.pir_prev_segment_end_positions:
+            blend_factor = segment_elapsed / blend_time if blend_time > 0 else 1.0
+            # Smootherstep
+            bf = blend_factor
+            blend_factor = bf * bf * bf * (bf * (bf * 6.0 - 15.0) + 10.0)
+            
+            for i in range(8):
+                old_pos = self.pir_prev_segment_end_positions[i]
+                new_pos = positions[i]
+                positions[i] = old_pos + (new_pos - old_pos) * blend_factor
+        elif segment_elapsed >= blend_time:
+            self.pir_needs_blend = False
+        
+        return positions, current_seg
+    
+    def get_pir_playback_speed(self):
+        """Get the playback speed for the current PIR state. Now always 1.0 (speed embedded in recording)."""
+        return 1.0
     
     def get_pir_active_recording_name(self):
-        """Get the recording filename for the current PIR state."""
-        recordings = {
-            'idle': self.pir_idle_recording.get(),
-            'active': self.pir_active_recording.get(),
-            'sleep': self.pir_sleep_recording.get()
+        """Get the current recording filename for the current PIR state."""
+        rec_lists = {
+            'idle': self.pir_idle_recordings,
+            'active': self.pir_active_recordings,
+            'sleep': self.pir_sleep_recordings
         }
-        return recordings.get(self.pir_state, "")
+        rec_list = rec_lists.get(self.pir_state, [])
+        if not rec_list:
+            return ""
+        
+        # Get current index for this state
+        idx = self.pir_recording_index.get(self.pir_state, 0) % len(rec_list)
+        return rec_list[idx]
+    
+    def advance_pir_recording(self):
+        """Move to next recording in the current state's list (random or sequential)."""
+        rec_lists = {
+            'idle': self.pir_idle_recordings,
+            'active': self.pir_active_recordings,
+            'sleep': self.pir_sleep_recordings
+        }
+        rec_list = rec_lists.get(self.pir_state, [])
+        
+        if len(rec_list) <= 1:
+            return  # No other recordings to switch to
+        
+        import random
+        # Pick a different recording randomly
+        current_idx = self.pir_recording_index.get(self.pir_state, 0)
+        available = [i for i in range(len(rec_list)) if i != current_idx]
+        if available:
+            new_idx = random.choice(available)
+            self.pir_recording_index[self.pir_state] = new_idx
+            
+            # Store current positions for crossfade
+            self.pir_prev_rec_positions = {
+                'fingers': self.finger_positions[:],
+                'arm': self.arm_positions[:]
+            }
+            self.pir_rec_blend_factor = 0.0
+            print(f"🔄 Switching to recording: {rec_list[new_idx]}")
+            
+            # Update the display to show new recording
+            self.update_pir_state_display()
     
     def get_pir_active_layers(self):
         """Get the loaded layers for the current PIR state. Returns list or None."""
@@ -2206,40 +3147,63 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             return None
         return self.load_pir_recording(recording_name)
     
+    def _get_pir_crossfade_target_layers(self):
+        """Get the layers for the crossfade target recording. Returns list or None."""
+        rec_lists = {
+            'idle': self.pir_idle_recordings,
+            'active': self.pir_active_recordings,
+            'sleep': self.pir_sleep_recordings
+        }
+        rec_list = rec_lists.get(self.pir_state, [])
+        if not rec_list or self.pir_crossfade_target_idx >= len(rec_list):
+            return None
+        
+        target_name = rec_list[self.pir_crossfade_target_idx]
+        if not target_name or target_name == '(None)':
+            return None
+        return self.load_pir_recording(target_name)
+    
     def export_pir_state_machine(self):
         """Export the complete PIR State Machine to Arduino .ino file."""
         # Validate that we have recordings assigned
-        idle_rec = self.pir_idle_recording.get()
-        active_rec = self.pir_active_recording.get()
-        sleep_rec = self.pir_sleep_recording.get()
+        idle_recs = self.pir_idle_recordings
+        active_recs = self.pir_active_recordings
+        sleep_recs = self.pir_sleep_recordings
         
-        if not any([idle_rec, active_rec, sleep_rec]):
+        if not any([idle_recs, active_recs, sleep_recs]):
             tkinter.messagebox.showwarning("No Recordings", 
                 "Please assign at least one recording to a PIR state before exporting.")
             return
         
-        # Load all the recordings
-        recordings = {}
-        for state, rec_name in [('idle', idle_rec), ('active', active_rec), ('sleep', sleep_rec)]:
-            if rec_name and rec_name != '(None)':
-                layers = self.load_pir_recording(rec_name)
-                if layers:
-                    recordings[state] = layers
-                    print(f"📂 Loaded {state}: {rec_name} ({len(layers)} layers)")
-                    for layer in layers:
-                        print(f"   Layer '{layer.get('name')}': {len(layer.get('data', []))} frames, duration={layer.get('duration', 0):.2f}s")
-                else:
-                    print(f"⚠️ Could not load recording for {state}: {rec_name}")
+        # Load all the recordings for each state
+        # Structure: {state: [layers_list1, layers_list2, ...]}
+        recordings = {'idle': [], 'active': [], 'sleep': []}
         
-        if not recordings:
+        for state, rec_list in [('idle', idle_recs), ('active', active_recs), ('sleep', sleep_recs)]:
+            for rec_name in rec_list:
+                if rec_name and rec_name != '(None)':
+                    layers = self.load_pir_recording(rec_name)
+                    if layers:
+                        recordings[state].append({'name': rec_name, 'layers': layers})
+                        print(f"📂 Loaded {state}: {rec_name} ({len(layers)} layers)")
+                    else:
+                        print(f"⚠️ Could not load recording for {state}: {rec_name}")
+        
+        total_recordings = sum(len(r) for r in recordings.values())
+        if total_recordings == 0:
             tkinter.messagebox.showerror("Load Failed", "Could not load any of the assigned recordings.")
             return
         
-        # Generate the Arduino code
-        code = self.generate_pir_state_machine_code(recordings)
+        # Generate the Arduino code - use Markov if enabled
+        if self.pir_markov_enabled.get():
+            code = self.generate_markov_pir_code(recordings)
+            mode_str = "Markov"
+        else:
+            code = self.generate_pir_state_machine_code(recordings)
+            mode_str = "Crossfade"
         
         # Save to file
-        filename = f"pir_state_machine_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.ino"
+        filename = f"pir_{mode_str.lower()}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.ino"
         filepath = os.path.join(os.getcwd(), filename)
         
         try:
@@ -2248,29 +3212,39 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             
             # Show success with details
             states_info = []
-            for state in ['idle', 'active', 'sleep']:
-                rec = getattr(self, f'pir_{state}_recording').get()
-                speed = getattr(self, f'pir_{state}_speed').get()
-                if rec and rec != '(None)':
-                    states_info.append(f"  {state.upper()}: {rec} @ {speed}x speed")
+            for state, rec_list in [('idle', self.pir_idle_recordings), 
+                                    ('active', self.pir_active_recordings), 
+                                    ('sleep', self.pir_sleep_recordings)]:
+                if rec_list:
+                    rec_names = ', '.join(rec_list[:3])  # Show up to 3
+                    if len(rec_list) > 3:
+                        rec_names += f" (+{len(rec_list)-3} more)"
+                    states_info.append(f"  {state.upper()}: {len(rec_list)} recording(s)\n    {rec_names}")
                 else:
                     states_info.append(f"  {state.upper()}: (none)")
             
-            tkinter.messagebox.showinfo("PIR Export Successful", 
+            extra_info = ""
+            if mode_str == "Markov":
+                extra_info = f"\nMarkov Settings:\n  Segment length: {self.pir_markov_segment_length.get()}s\n  Chaos: {self.pir_markov_chaos.get()}%\n  Blend time: {self.pir_markov_blend_time.get()}s\n"
+            
+            tkinter.messagebox.showinfo(f"PIR Export ({mode_str})", 
                 f"Arduino code exported to:\n{filepath}\n\n" +
+                f"Mode: {mode_str}\n\n" +
                 f"State Recordings:\n" + "\n".join(states_info) + "\n\n" +
                 f"Timing:\n" +
                 f"  Active duration: {self.pir_active_duration.get()}s\n" +
                 f"  Sleep timeout: {self.pir_sleep_timeout.get()} min\n" +
-                f"  Blend time: {self.pir_transition_time.get()}s")
+                f"  Blend time: {self.pir_transition_time.get()}s" + extra_info)
             
-            print(f"📤 PIR State Machine exported to {filepath}")
+            print(f"📤 PIR State Machine ({mode_str}) exported to {filepath}")
             
         except Exception as e:
             tkinter.messagebox.showerror("Export Failed", f"Failed to export:\n{e}")
     
     def generate_pir_state_machine_code(self, recordings):
-        """Generate Arduino code for the PIR state machine."""
+        """Generate Arduino code for the PIR state machine.
+        recordings format: {state: [{name, layers}, ...]}
+        """
         
         # Hardware config
         hw = self.hardware_config
@@ -2285,19 +3259,32 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         sleep_timeout_ms = int(self.pir_sleep_timeout.get() * 60 * 1000)
         blend_time_ms = int(self.pir_transition_time.get() * 1000)
         
-        # Speeds (as fixed-point multipliers, 100 = 1.0x)
-        idle_speed = int(self.pir_idle_speed.get() * 100)
-        active_speed = int(self.pir_active_speed.get() * 100)
-        sleep_speed = int(self.pir_sleep_speed.get() * 100)
+        # Crossfade config
+        crossfade_enabled = 'true' if self.pir_crossfade_enabled.get() else 'false'
+        crossfade_interval_min = int(self.pir_crossfade_interval_min.get() * 1000)
+        crossfade_interval_max = int(self.pir_crossfade_interval_max.get() * 1000)
+        crossfade_duration_min = int(self.pir_crossfade_duration_min.get() * 1000)
+        crossfade_duration_max = int(self.pir_crossfade_duration_max.get() * 1000)
+        
+        # Organic wobble config
+        wobble_amount = float(self.position_wobble.get())
+        
+        # Count total recordings per state for comments
+        rec_counts = {s: len(recs) for s, recs in recordings.items()}
         
         code = f'''// PIR State Machine - Auto-generated by Hand Control Interface
 // Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 // 
 // State Machine:
-//   MOTION DETECTED -> ACTIVE state (plays active recording)
+//   MOTION DETECTED -> ACTIVE state (plays active recordings)
 //   After {self.pir_active_duration.get()}s no motion -> IDLE state  
 //   After {self.pir_sleep_timeout.get()} min idle -> SLEEP state
 //   Any motion -> back to ACTIVE
+//
+// Recordings per state:
+//   IDLE: {rec_counts.get('idle', 0)} recordings
+//   ACTIVE: {rec_counts.get('active', 0)} recordings  
+//   SLEEP: {rec_counts.get('sleep', 0)} recordings
 //
 // Smooth blending between states over {self.pir_transition_time.get()}s
 
@@ -2312,11 +3299,6 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
 const unsigned long ACTIVE_DURATION = {active_duration_ms}UL;
 const unsigned long SLEEP_TIMEOUT = {sleep_timeout_ms}UL;
 const unsigned long BLEND_TIME = {blend_time_ms}UL;
-
-// Playback speeds (100 = 1.0x, 50 = 0.5x, 200 = 2.0x)
-const int IDLE_SPEED = {idle_speed};
-const int ACTIVE_SPEED = {active_speed};
-const int SLEEP_SPEED = {sleep_speed};
 
 // Servo pin mapping
 const int servoPins[NUM_SERVOS] = {{{', '.join(map(str, pins))}}};
@@ -2336,7 +3318,29 @@ State previousState = STATE_IDLE;
 unsigned long lastMotionTime = 0;
 unsigned long stateStartTime = 0;
 unsigned long transitionStartTime = 0;
-float blendFactor = 1.0;
+float stateBlendFactor = 1.0;  // For state-to-state transitions
+
+// Recording crossfade system (for organic blending within a state)
+// Each state has two "active" recordings that crossfade into each other
+int idleRecA = 0, idleRecB = 0;
+int activeRecA = 0, activeRecB = 0;
+int sleepRecA = 0, sleepRecB = 0;
+float crossfadeFactor = 0.0;           // 0.0 = 100% recA, 1.0 = 100% recB
+unsigned long crossfadeStartTime = 0;
+unsigned long crossfadeDuration = 3000; // How long each crossfade takes (ms)
+unsigned long nextCrossfadeTime = 0;    // When to start the next crossfade
+bool isCrossfading = false;
+
+// Crossfade timing range (randomized for organic feel)
+const unsigned long MIN_CROSSFADE_INTERVAL = {crossfade_interval_min}UL;  // Min time between crossfades
+const unsigned long MAX_CROSSFADE_INTERVAL = {crossfade_interval_max}UL; // Max time between crossfades
+const unsigned long MIN_CROSSFADE_DURATION = {crossfade_duration_min}UL;  // Min crossfade length
+const unsigned long MAX_CROSSFADE_DURATION = {crossfade_duration_max}UL;  // Max crossfade length
+const bool CROSSFADE_ENABLED = {crossfade_enabled};  // Enable organic crossfading between recordings
+
+// Organic sine wave wobble (adds life-like micro-movements)
+const float WOBBLE_AMOUNT = {wobble_amount};  // Max degrees of wobble (0 = disabled)
+float phaseOffsets[NUM_SERVOS];  // Random phase offset per servo for variety
 
 // Current servo positions (for blending)
 int currentPositions[NUM_SERVOS] = {{90, 90, 90, 90, 90, 90, 90, 90}};
@@ -2348,8 +3352,21 @@ Servo servos[NUM_SERVOS];
 '''
         
         # Generate the movement data arrays for each state
-        for state_name, layers in recordings.items():
-            code += self._generate_state_movement_data(state_name, layers, min_angle, max_angle)
+        # For multi-recording states, we generate arrays for each recording
+        for state_name, rec_list in recordings.items():
+            if not rec_list:
+                code += f"\n// No recordings for {state_name} state\n"
+                continue
+            
+            for rec_idx, rec_data in enumerate(rec_list):
+                rec_name = rec_data['name']
+                layers = rec_data['layers']
+                array_suffix = f"_{rec_idx}" if len(rec_list) > 1 else ""
+                code += f"\n// {state_name.upper()} recording {rec_idx}: {rec_name}\n"
+                code += self._generate_state_movement_data(f"{state_name}{array_suffix}", layers, min_angle, max_angle)
+            
+            # Add count constant for this state (use #define so #ifdef works)
+            code += f"#define NUM_{state_name.upper()}_RECORDINGS {len(rec_list)}\n"
         
         code += '''
 // ==================== HELPER FUNCTIONS ====================
@@ -2367,20 +3384,10 @@ int applyServoLimits(int angle, int servoIdx) {
 }
 
 int blendPositions(int from, int to, float factor) {
-  // Smooth easing (ease-in-out)
-  float easedFactor = factor < 0.5 
-    ? 2.0 * factor * factor 
-    : 1.0 - pow(-2.0 * factor + 2.0, 2) / 2.0;
+  // Smootherstep for very smooth state transitions (barely noticeable)
+  float t = factor;
+  float easedFactor = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);  // Ken Perlin smootherstep
   return from + (int)((to - from) * easedFactor);
-}
-
-int getStateSpeed(State state) {
-  switch (state) {
-    case STATE_IDLE: return IDLE_SPEED;
-    case STATE_ACTIVE: return ACTIVE_SPEED;
-    case STATE_SLEEP: return SLEEP_SPEED;
-    default: return 100;
-  }
 }
 
 '''
@@ -2389,6 +3396,73 @@ int getStateSpeed(State state) {
         code += self._generate_position_lookup_functions(recordings)
         
         code += '''
+// ==================== CROSSFADE SYSTEM ====================
+
+void updateCrossfade() {
+  // Skip if crossfade is disabled
+  if (!CROSSFADE_ENABLED) return;
+  
+  unsigned long now = millis();
+  
+  // Check if we should start a new crossfade
+  if (!isCrossfading && now >= nextCrossfadeTime) {
+    startNewCrossfade();
+  }
+  
+  // Update crossfade progress
+  if (isCrossfading) {
+    unsigned long elapsed = now - crossfadeStartTime;
+    if (elapsed >= crossfadeDuration) {
+      // Crossfade complete - A becomes B, pick new B
+      finishCrossfade();
+    } else {
+      // Very smooth crossfade using smootherstep (barely noticeable)
+      float t = (float)elapsed / crossfadeDuration;
+      // Smootherstep (Ken Perlin) - much gentler than smoothstep
+      crossfadeFactor = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+    }
+  }
+}
+
+void startNewCrossfade() {
+  isCrossfading = true;
+  crossfadeStartTime = millis();
+  crossfadeDuration = random(MIN_CROSSFADE_DURATION, MAX_CROSSFADE_DURATION);
+  crossfadeFactor = 0.0;
+  
+  // Pick a new target recording (recB) different from current (recA)
+  switch (currentState) {
+    case STATE_IDLE:
+      #if NUM_IDLE_RECORDINGS > 1
+      do { idleRecB = random(NUM_IDLE_RECORDINGS); } while (idleRecB == idleRecA);
+      #endif
+      break;
+    case STATE_ACTIVE:
+      #if NUM_ACTIVE_RECORDINGS > 1
+      do { activeRecB = random(NUM_ACTIVE_RECORDINGS); } while (activeRecB == activeRecA);
+      #endif
+      break;
+    case STATE_SLEEP:
+      #if NUM_SLEEP_RECORDINGS > 1
+      do { sleepRecB = random(NUM_SLEEP_RECORDINGS); } while (sleepRecB == sleepRecA);
+      #endif
+      break;
+  }
+}
+
+void finishCrossfade() {
+  isCrossfading = false;
+  crossfadeFactor = 0.0;
+  
+  // A becomes B (we've fully transitioned to B)
+  idleRecA = idleRecB;
+  activeRecA = activeRecB;
+  sleepRecA = sleepRecB;
+  
+  // Schedule next crossfade at random interval
+  nextCrossfadeTime = millis() + random(MIN_CROSSFADE_INTERVAL, MAX_CROSSFADE_INTERVAL);
+}
+
 // ==================== STATE MACHINE LOGIC ====================
 
 void checkStateTransitions() {
@@ -2421,11 +3495,11 @@ void checkStateTransitions() {
     startTransition(newState);
   }
   
-  // Update blend factor
+  // Update state blend factor
   if (now - transitionStartTime < BLEND_TIME) {
-    blendFactor = (float)(now - transitionStartTime) / BLEND_TIME;
+    stateBlendFactor = (float)(now - transitionStartTime) / BLEND_TIME;
   } else {
-    blendFactor = 1.0;
+    stateBlendFactor = 1.0;
   }
 }
 
@@ -2440,11 +3514,38 @@ void startTransition(State newState) {
     transitionFromPositions[i] = currentPositions[i];
   }
   
+  // Initialize crossfade for the new state with random recordings
+  switch (newState) {
+    case STATE_IDLE:
+      #ifdef NUM_IDLE_RECORDINGS
+      idleRecA = random(NUM_IDLE_RECORDINGS);
+      idleRecB = random(NUM_IDLE_RECORDINGS);
+      #endif
+      break;
+    case STATE_ACTIVE:
+      #ifdef NUM_ACTIVE_RECORDINGS
+      activeRecA = random(NUM_ACTIVE_RECORDINGS);
+      activeRecB = random(NUM_ACTIVE_RECORDINGS);
+      #endif
+      break;
+    case STATE_SLEEP:
+      #ifdef NUM_SLEEP_RECORDINGS
+      sleepRecA = random(NUM_SLEEP_RECORDINGS);
+      sleepRecB = random(NUM_SLEEP_RECORDINGS);
+      #endif
+      break;
+  }
+  
+  // Reset crossfade state
+  isCrossfading = false;
+  crossfadeFactor = 0.0;
+  nextCrossfadeTime = millis() + random(MIN_CROSSFADE_INTERVAL, MAX_CROSSFADE_INTERVAL);
+  
   previousState = currentState;
   currentState = newState;
   stateStartTime = millis();
   transitionStartTime = millis();
-  blendFactor = 0.0;
+  stateBlendFactor = 0.0;
 }
 
 void triggerMotion() {
@@ -2467,18 +3568,30 @@ void updateServos() {
   unsigned long elapsed = now - lastUpdate;
   lastUpdate = now;
   
-  // Advance playback time based on current state speed
-  int speed = getStateSpeed(currentState);
-  playbackTime += (elapsed * speed) / 100;
+  // Advance playback time
+  playbackTime += elapsed;
   
-  // Get target positions from current state recording
+  // Update crossfade between recordings
+  updateCrossfade();
+  
+  // Get blended positions from current state's recordings
+  int positionsA[NUM_SERVOS];
+  int positionsB[NUM_SERVOS];
   int targetPositions[NUM_SERVOS];
-  getPositionsForState(currentState, playbackTime, targetPositions);
   
-  // If blending, interpolate from transition positions
-  if (blendFactor < 1.0) {
+  // Get positions from both active recordings
+  getPositionsForRecording(currentState, 0, playbackTime, positionsA);  // Recording A
+  getPositionsForRecording(currentState, 1, playbackTime, positionsB);  // Recording B
+  
+  // Blend between the two recordings
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    targetPositions[i] = positionsA[i] + (int)((positionsB[i] - positionsA[i]) * crossfadeFactor);
+  }
+  
+  // If transitioning between states, blend from old positions
+  if (stateBlendFactor < 1.0) {
     for (int i = 0; i < NUM_SERVOS; i++) {
-      currentPositions[i] = blendPositions(transitionFromPositions[i], targetPositions[i], blendFactor);
+      currentPositions[i] = blendPositions(transitionFromPositions[i], targetPositions[i], stateBlendFactor);
     }
   } else {
     for (int i = 0; i < NUM_SERVOS; i++) {
@@ -2486,9 +3599,26 @@ void updateServos() {
     }
   }
   
-  // Write to servos
+  // Write to servos with organic wobble
+  float t = millis() / 1000.0;  // Time in seconds
   for (int i = 0; i < NUM_SERVOS; i++) {
-    int angle = applyServoLimits(currentPositions[i], i);
+    int finalPos = currentPositions[i];
+    
+    // Apply organic sine-wave wobble if enabled
+    if (WOBBLE_AMOUNT > 0) {
+      float phase = phaseOffsets[i];
+      // Layer 1: Slow breathing rhythm (~7 second cycle)
+      float breath = sin(t * 0.9 + phase) * 0.5;
+      // Layer 2: Medium drift (~2.5 second cycle)
+      float drift = sin(t * 2.5 + phase * 1.3) * 0.3;
+      // Layer 3: Subtle micro-tremor (faster, smaller)
+      float tremor = sin(t * 7.5 + phase * 2.1) * 0.2;
+      
+      float wobble = (breath + drift + tremor) * WOBBLE_AMOUNT;
+      finalPos += (int)wobble;
+    }
+    
+    int angle = applyServoLimits(finalPos, i);
     servos[i].write(angle);
   }
 }
@@ -2503,8 +3633,16 @@ void setup() {
   Serial.begin(9600);
   Serial.println("PIR State Machine Starting...");
   
+  // Seed random number generator for recording selection
+  randomSeed(analogRead(0));
+  
   // Initialize PIR pin
   pinMode(PIR_PIN, INPUT);
+  
+  // Initialize random phase offsets for organic wobble
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    phaseOffsets[i] = random(0, 628) / 100.0;  // 0 to 2*PI
+  }
   
   // Attach servos
   for (int i = 0; i < NUM_SERVOS; i++) {
@@ -2538,6 +3676,520 @@ void loop() {
         
         return code
     
+    def generate_markov_pir_code(self, recordings):
+        """Generate Arduino code for PIR state machine with Markov segment transitions.
+        recordings format: {state: [{name, layers}, ...]}
+        
+        MEMORY OPTIMIZATIONS:
+        - Sparse transitions: Only store top-4 likely next segments per segment (8 bytes vs N bytes)
+        - Reduced samples: 12 samples per segment (vs 25) - still smooth with interpolation
+        - This means: segments = N * 12 * 8 = 96 bytes/segment + 8 bytes transition
+        """
+        import math
+        
+        # Memory-efficient settings
+        SAMPLES_PER_SEG = 12  # Reduced from 25 - interpolation fills gaps
+        TOP_K_TRANSITIONS = 6  # Store 6 most likely next segments for variety
+        
+        # Hardware config
+        hw = self.hardware_config
+        pins = hw['pin_mapping']
+        reversed_servos = hw['reversed_servos']
+        min_angle = hw['global_min_angle']
+        max_angle = hw['global_max_angle']
+        
+        # Timing config
+        active_duration_ms = int(self.pir_active_duration.get() * 1000)
+        sleep_timeout_ms = int(self.pir_sleep_timeout.get() * 60 * 1000)
+        blend_time_ms = int(self.pir_transition_time.get() * 1000)
+        
+        # Markov config
+        segment_length = self.pir_markov_segment_length.get()
+        segment_length_ms = int(segment_length * 1000)
+        chaos = self.pir_markov_chaos.get() / 100.0
+        markov_blend_ms = int(self.pir_markov_blend_time.get() * 1000)
+        wobble_amount = float(self.position_wobble.get())
+        
+        # Build segments for each state
+        all_segments = {'idle': [], 'active': [], 'sleep': []}
+        all_transitions = {'idle': [], 'active': [], 'sleep': []}  # Now sparse: [(idx, prob), ...]
+        
+        for state_name, rec_list in recordings.items():
+            segments = []
+            for rec_data in rec_list:
+                layers = rec_data['layers']
+                merged = self._merge_layers_to_samples(layers, sample_rate=50)
+                if not merged:
+                    continue
+                
+                samples_per_segment = int(segment_length * 50)
+                num_segments = len(merged) // samples_per_segment
+                
+                for seg_idx in range(num_segments):
+                    start_idx = seg_idx * samples_per_segment
+                    end_idx = start_idx + samples_per_segment
+                    segment_data = merged[start_idx:end_idx]
+                    
+                    if len(segment_data) >= samples_per_segment:
+                        # Subsample to SAMPLES_PER_SEG samples
+                        subsampled = []
+                        step = max(1, len(segment_data) // SAMPLES_PER_SEG)
+                        for i in range(0, len(segment_data), step):
+                            if len(subsampled) < SAMPLES_PER_SEG:
+                                subsampled.append(segment_data[i])
+                        while len(subsampled) < SAMPLES_PER_SEG:
+                            subsampled.append(segment_data[-1])
+                        
+                        # Randomize duration with bias toward longer (1.2-3.0s, biased toward 1.8-2.5s)
+                        import random
+                        random_duration = random.triangular(1.2, 3.0, 2.0)
+                        
+                        segments.append({
+                            'data': subsampled,
+                            'start': subsampled[0],
+                            'end': subsampled[-1],
+                            'duration': random_duration
+                        })
+            
+            all_segments[state_name] = segments
+            
+            # Build SPARSE transition data (only top-K most likely transitions)
+            if len(segments) > 1:
+                sparse_trans = []
+                for i, seg_i in enumerate(segments):
+                    # Calculate probability to each other segment
+                    probs = []
+                    for j, seg_j in enumerate(segments):
+                        if i == j:
+                            prob = 5  # Small self-loop chance
+                        else:
+                            # Calculate similarity (smaller distance = higher prob)
+                            dist = 0
+                            for k in range(8):
+                                diff = seg_i['end'][k] - seg_j['start'][k]
+                                dist += diff * diff
+                            dist = math.sqrt(dist)
+                            similarity = max(1, int(100 * (1 - dist / 200)))
+                            # Mix with uniform based on chaos
+                            uniform = 100 // (len(segments) - 1) if len(segments) > 1 else 100
+                            prob = int((1 - chaos) * similarity + chaos * uniform)
+                        probs.append((j, max(1, prob)))
+                    
+                    # Sort by probability and take top K
+                    probs.sort(key=lambda x: x[1], reverse=True)
+                    top_k = probs[:TOP_K_TRANSITIONS]
+                    
+                    # Normalize probabilities to sum to 255 (fit in byte)
+                    total = sum(p[1] for p in top_k)
+                    if total > 0:
+                        top_k = [(idx, min(255, int(p * 255 / total))) for idx, p in top_k]
+                    
+                    sparse_trans.append(top_k)
+                
+                all_transitions[state_name] = sparse_trans
+        
+        # Calculate and display actual memory usage
+        total_segs = sum(len(segs) for segs in all_segments.values())
+        seg_bytes = total_segs * SAMPLES_PER_SEG * 8
+        trans_bytes = total_segs * TOP_K_TRANSITIONS * 2  # idx + prob per transition
+        total_data_kb = (seg_bytes + trans_bytes) / 1024
+        print(f"[MARKOV EXPORT] {total_segs} segments, ~{total_data_kb:.1f}KB data")
+        
+        # Generate code
+        code = f'''// PIR Markov State Machine - Auto-generated
+// Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+// Mode: Markov Segments (learned transitions between movement chunks)
+//
+// Segment length: {segment_length}s, Chaos: {int(chaos*100)}%, Blend: {markov_blend_ms}ms
+// idle: {len(all_segments['idle'])} segments, active: {len(all_segments['active'])} segments, sleep: {len(all_segments['sleep'])} segments
+//
+
+#include <Servo.h>
+
+// ==================== CONFIGURATION ====================
+#define PIR_PIN 3
+#define NUM_SERVOS 8
+#define UPDATE_INTERVAL 20
+#define SAMPLES_PER_SEGMENT {SAMPLES_PER_SEG}
+#define TOP_K_TRANS {TOP_K_TRANSITIONS}
+
+const int servoPins[NUM_SERVOS] = {{{', '.join(map(str, pins))}}};
+const bool servoReversed[NUM_SERVOS] = {{{', '.join('true' if i in reversed_servos else 'false' for i in range(8))}}};
+const int SERVO_MIN = {min_angle};
+const int SERVO_MAX = {max_angle};
+
+// Timing
+const unsigned long ACTIVE_DURATION = {active_duration_ms}UL;
+const unsigned long SLEEP_TIMEOUT = {sleep_timeout_ms}UL;
+const unsigned long STATE_BLEND_TIME = {blend_time_ms}UL;
+// const unsigned long SEGMENT_DURATION = {segment_length_ms}UL;  // Now variable per segment
+const unsigned long SEGMENT_BLEND_TIME = {markov_blend_ms}UL;
+
+// Organic wobble
+const float WOBBLE_AMOUNT = {wobble_amount};
+float phaseOffsets[NUM_SERVOS];
+
+// ==================== SEGMENT DATA ====================
+'''
+        
+        # Generate segment data for each state
+        for state_name in ['idle', 'active', 'sleep']:
+            segments = all_segments[state_name]
+            state_upper = state_name.upper()
+            
+            if not segments:
+                code += f"\n// No segments for {state_upper}\n"
+                code += f"#define NUM_{state_upper}_SEGMENTS 0\n"
+                continue
+            
+            code += f"\n// {state_upper} state: {len(segments)} segments\n"
+            code += f"#define NUM_{state_upper}_SEGMENTS {len(segments)}\n"
+            
+            # Generate segment durations (in milliseconds)
+            code += f"const PROGMEM unsigned int {state_name}Durations[NUM_{state_upper}_SEGMENTS] = {{\n  "
+            # Fallback to segment_length if 'duration' key doesn't exist (old segments)
+            default_duration = self.pir_markov_segment_length.get()
+            duration_strs = [str(int(seg.get('duration', default_duration) * 1000)) for seg in segments]
+            code += ', '.join(duration_strs)
+            code += "\n};\n"
+            
+            # Generate segment position data (compact format)
+            code += f"const PROGMEM uint8_t {state_name}Seg[NUM_{state_upper}_SEGMENTS][SAMPLES_PER_SEGMENT][NUM_SERVOS] = {{\n"
+            for seg_idx, seg in enumerate(segments):
+                # Compact: one segment per line
+                code += "  {"
+                for sample_idx, sample in enumerate(seg['data']):
+                    vals = [str(int(max(0, min(180, sample[i])))) for i in range(8)]
+                    code += "{" + ','.join(vals) + "}"
+                    if sample_idx < len(seg['data']) - 1:
+                        code += ","
+                code += "}"
+                if seg_idx < len(segments) - 1:
+                    code += ","
+                code += "\n"
+            code += "};\n"
+            
+            # Generate SPARSE transition data (top-4 per segment)
+            transitions = all_transitions.get(state_name, [])
+            if transitions:
+                # Format: [seg_idx][4] = {idx0, prob0, idx1, prob1, idx2, prob2, idx3, prob3}
+                code += f"const PROGMEM uint8_t {state_name}Trans[NUM_{state_upper}_SEGMENTS][{TOP_K_TRANSITIONS * 2}] = {{\n"
+                for seg_trans in transitions:
+                    entries = []
+                    for idx, prob in seg_trans:
+                        entries.extend([str(idx), str(prob)])
+                    # Pad if needed
+                    while len(entries) < TOP_K_TRANSITIONS * 2:
+                        entries.extend(['0', '0'])
+                    code += "  {" + ','.join(entries) + "},\n"
+                code += "};\n"
+        
+        # State machine and servo code
+        code += '''
+// ==================== STATE MACHINE ====================
+enum State { STATE_IDLE, STATE_ACTIVE, STATE_SLEEP };
+const char* stateNames[] = {"IDLE", "ACTIVE", "SLEEP"};
+
+State currentState = STATE_IDLE;
+State previousState = STATE_IDLE;
+
+unsigned long lastMotionTime = 0;
+unsigned long stateStartTime = 0;
+unsigned long transitionStartTime = 0;
+float stateBlendFactor = 1.0;
+
+// Markov segment tracking
+int currentSegment = 0;
+unsigned long segmentStartTime = 0;
+int prevSegmentEndPos[NUM_SERVOS];  // End positions from previous segment
+bool needsBlend = false;
+
+// Servo positions
+int currentPositions[NUM_SERVOS];
+int transitionFromPositions[NUM_SERVOS];
+Servo servos[NUM_SERVOS];
+
+// ==================== HELPER FUNCTIONS ====================
+int applyServoLimits(int position, int servoIdx) {
+  // Map 0-180 stored value to MIN_ANGLE-MAX_ANGLE output
+  int pos = map(position, 0, 180, SERVO_MIN, SERVO_MAX);
+  pos = constrain(pos, SERVO_MIN, SERVO_MAX);
+  
+  // Apply reversal WITHIN the output range (matches Python config)
+  if (servoReversed[servoIdx]) {
+    pos = SERVO_MAX - pos;
+  }
+  return pos;
+}
+
+float smootherstep(float t) {
+  return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+int getNumSegments(State state) {
+  switch (state) {
+    case STATE_IDLE: return NUM_IDLE_SEGMENTS;
+    case STATE_ACTIVE: return NUM_ACTIVE_SEGMENTS;
+    case STATE_SLEEP: return NUM_SLEEP_SEGMENTS;
+    default: return 0;
+  }
+}
+
+unsigned int getSegmentDuration(State state, int segmentIdx) {
+  switch (state) {
+    case STATE_IDLE: 
+      if (segmentIdx < NUM_IDLE_SEGMENTS)
+        return pgm_read_word(&idleDurations[segmentIdx]);
+      break;
+    case STATE_ACTIVE: 
+      if (segmentIdx < NUM_ACTIVE_SEGMENTS)
+        return pgm_read_word(&activeDurations[segmentIdx]);
+      break;
+    case STATE_SLEEP: 
+      if (segmentIdx < NUM_SLEEP_SEGMENTS)
+        return pgm_read_word(&sleepDurations[segmentIdx]);
+      break;
+  }
+  return 1000; // Fallback to 1 second
+}
+
+// Pick next segment using sparse transition table (top-K most likely transitions)
+int pickNextSegment(State state, int currentSeg) {
+  int numSegs = getNumSegments(state);
+  if (numSegs <= 1) return 0;
+  
+  // Get sparse transitions for this segment
+  uint8_t transData[TOP_K_TRANS * 2];
+  switch (state) {
+'''
+        
+        # Add sparse transition lookup for each state
+        for state_name in ['idle', 'active', 'sleep']:
+            if all_segments[state_name] and all_transitions.get(state_name):
+                code += f"    case STATE_{state_name.upper()}: for(int i=0;i<TOP_K_TRANS*2;i++) transData[i]=pgm_read_byte(&{state_name}Trans[currentSeg][i]); break;\n"
+        
+        code += '''    default: return random(numSegs);
+  }
+  
+  // Calculate total probability and pick
+  int total = 0;
+  for (int i = 0; i < TOP_K_TRANS; i++) {
+    total += transData[i*2 + 1];
+  }
+  if (total == 0) return random(numSegs);
+  
+  int target = random(total);
+  int cumulative = 0;
+  for (int i = 0; i < TOP_K_TRANS; i++) {
+    cumulative += transData[i*2 + 1];
+    if (target < cumulative) {
+      return transData[i*2];  // Return the segment index
+    }
+  }
+  return transData[0];  // Fallback to first option
+}
+
+void getSegmentPosition(State state, int segIdx, int sampleIdx, int* positions) {
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    uint8_t pos;
+    switch (state) {
+'''
+        
+        for state_name in ['idle', 'active', 'sleep']:
+            if all_segments[state_name]:
+                code += f"      case STATE_{state_name.upper()}: pos = pgm_read_byte(&{state_name}Seg[segIdx][sampleIdx][i]); break;\n"
+        
+        code += '''      default: pos = 90; break;
+    }
+    positions[i] = pos;
+  }
+}
+
+// ==================== MAIN FUNCTIONS ====================
+void triggerMotion() {
+  Serial.println("!!! PIR MOTION DETECTED !!!");
+  lastMotionTime = millis();
+  if (currentState == STATE_SLEEP) {
+    startStateTransition(STATE_ACTIVE);
+  } else if (currentState == STATE_IDLE) {
+    startStateTransition(STATE_ACTIVE);
+  }
+}
+
+void startStateTransition(State newState) {
+  Serial.print(">>> STATE CHANGE: ");
+  Serial.print(stateNames[currentState]);
+  Serial.print(" -> ");
+  Serial.println(stateNames[newState]);
+  
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    transitionFromPositions[i] = currentPositions[i];
+  }
+  previousState = currentState;
+  currentState = newState;
+  transitionStartTime = millis();
+  stateBlendFactor = 0;
+  
+  // Reset segment to random start
+  currentSegment = random(getNumSegments(newState));
+  segmentStartTime = millis();
+  needsBlend = false;
+}
+
+void checkStateTransitions() {
+  unsigned long now = millis();
+  unsigned long timeSinceMotion = now - lastMotionTime;
+  
+  switch (currentState) {
+    case STATE_ACTIVE:
+      if (timeSinceMotion >= ACTIVE_DURATION) {
+        startStateTransition(STATE_IDLE);
+      }
+      break;
+    case STATE_IDLE:
+      if (timeSinceMotion >= SLEEP_TIMEOUT) {
+        startStateTransition(STATE_SLEEP);
+      }
+      break;
+    case STATE_SLEEP:
+      break;
+  }
+  
+  // Update state blend factor
+  if (millis() - transitionStartTime < STATE_BLEND_TIME) {
+    stateBlendFactor = smootherstep((float)(millis() - transitionStartTime) / STATE_BLEND_TIME);
+  } else {
+    stateBlendFactor = 1.0;
+  }
+}
+
+void updateServos() {
+  unsigned long now = millis();
+  int numSegs = getNumSegments(currentState);
+  if (numSegs == 0) return;
+  
+  // Time within current segment
+  unsigned long segmentElapsed = now - segmentStartTime;
+  unsigned int currentSegmentDuration = getSegmentDuration(currentState, currentSegment);
+  
+  // Check if segment is done
+  if (segmentElapsed >= currentSegmentDuration) {
+    // Store last sample position for blending
+    int lastIdx = SAMPLES_PER_SEGMENT - 1;
+    getSegmentPosition(currentState, currentSegment, lastIdx, prevSegmentEndPos);
+    
+    // Pick next segment
+    currentSegment = pickNextSegment(currentState, currentSegment);
+    segmentStartTime = now;
+    needsBlend = true;
+    segmentElapsed = 0;
+    currentSegmentDuration = getSegmentDuration(currentState, currentSegment);
+  }
+  
+  // Calculate position within segment WITH INTERPOLATION
+  float progress = (float)segmentElapsed / currentSegmentDuration;
+  float sampleFloat = progress * (SAMPLES_PER_SEGMENT - 1);
+  int sampleIdx = constrain((int)sampleFloat, 0, SAMPLES_PER_SEGMENT - 2);
+  float interpFactor = sampleFloat - sampleIdx;
+  
+  int posA[NUM_SERVOS], posB[NUM_SERVOS];
+  getSegmentPosition(currentState, currentSegment, sampleIdx, posA);
+  getSegmentPosition(currentState, currentSegment, sampleIdx + 1, posB);
+  
+  int targetPositions[NUM_SERVOS];
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    targetPositions[i] = posA[i] + (int)((posB[i] - posA[i]) * interpFactor);
+  }
+  
+  // Blend from previous segment if needed
+  if (needsBlend && segmentElapsed < SEGMENT_BLEND_TIME) {
+    float blendFactor = smootherstep((float)segmentElapsed / SEGMENT_BLEND_TIME);
+    for (int i = 0; i < NUM_SERVOS; i++) {
+      targetPositions[i] = prevSegmentEndPos[i] + (int)((targetPositions[i] - prevSegmentEndPos[i]) * blendFactor);
+    }
+  } else {
+    needsBlend = false;
+  }
+  
+  // Apply state transition blend
+  if (stateBlendFactor < 1.0) {
+    for (int i = 0; i < NUM_SERVOS; i++) {
+      currentPositions[i] = transitionFromPositions[i] + (int)((targetPositions[i] - transitionFromPositions[i]) * stateBlendFactor);
+    }
+  } else {
+    for (int i = 0; i < NUM_SERVOS; i++) {
+      currentPositions[i] = targetPositions[i];
+    }
+  }
+  
+  // Apply organic wobble and write to servos
+  float t = millis() / 1000.0;
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    int finalPos = currentPositions[i];
+    
+    if (WOBBLE_AMOUNT > 0) {
+      float phase = phaseOffsets[i];
+      float breath = sin(t * 0.9 + phase) * 0.5;
+      float drift = sin(t * 2.5 + phase * 1.3) * 0.3;
+      float tremor = sin(t * 7.5 + phase * 2.1) * 0.2;
+      finalPos += (int)((breath + drift + tremor) * WOBBLE_AMOUNT);
+    }
+    
+    servos[i].write(applyServoLimits(finalPos, i));
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("PIR Markov State Machine Starting...");
+  
+  randomSeed(analogRead(0));
+  pinMode(PIR_PIN, INPUT);
+  
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    phaseOffsets[i] = random(0, 628) / 100.0;
+    servos[i].attach(servoPins[i]);
+    servos[i].write(90);
+    currentPositions[i] = 90;
+  }
+  
+  lastMotionTime = millis();
+  stateStartTime = millis();
+  transitionStartTime = millis();
+  segmentStartTime = millis();
+  currentSegment = random(getNumSegments(STATE_IDLE));
+  needsBlend = false;
+  
+  Serial.println("Ready - Markov segment mode (variable durations)");
+  Serial.print("Blend time: "); Serial.print(SEGMENT_BLEND_TIME); Serial.println("ms");
+}
+
+unsigned long lastDebugTime = 0;
+
+void loop() {
+  bool pirHigh = digitalRead(PIR_PIN) == HIGH;
+  if (pirHigh) {
+    triggerMotion();
+  }
+  
+  checkStateTransitions();
+  updateServos();
+  
+  // Debug output every 2 seconds
+  if (millis() - lastDebugTime > 2000) {
+    Serial.print("State:"); Serial.print(stateNames[currentState]);
+    Serial.print(" Seg:"); Serial.print(currentSegment);
+    Serial.print("/"); Serial.print(getNumSegments(currentState));
+    Serial.print(" PIR:"); Serial.println(pirHigh  ? "HIGH" : "LOW");
+    lastDebugTime = millis();
+  }
+  
+  delay(UPDATE_INTERVAL);
+}
+'''
+        
+        return code
+
     def _generate_state_movement_data(self, state_name, layers, min_angle, max_angle):
         """Generate the PROGMEM movement data arrays for a state."""
         
@@ -2701,28 +4353,48 @@ void loop() {
         return result
     
     def _generate_position_lookup_functions(self, recordings):
-        """Generate the function that looks up positions for each state WITH interpolation.
+        """Generate the function that looks up positions for a specific recording slot.
         
-        Note: PROGMEM access requires direct array references, so we generate
-        inline code for each state rather than using a function pointer.
+        The crossfade system uses two slots (A=0, B=1) that hold indices into the
+        recording arrays. This function reads positions from the recording at the
+        specified slot.
         """
         
-        code = "void getPositionsForState(State state, unsigned long playbackTime, int* positions) {\n"
+        # Generate getPositionsForRecording(state, slot, playbackTime, positions)
+        # slot 0 = recA, slot 1 = recB
+        code = "void getPositionsForRecording(State state, int slot, unsigned long playbackTime, int* positions) {\n"
         code += "  unsigned long duration;\n"
         code += "  int numSamples;\n"
         code += "  int sampleIdx, nextIdx;\n"
         code += "  unsigned long samplePos;\n"
         code += "  int fraction;\n"
+        code += "  int recIdx;\n"
         code += "  \n"
+        code += "  // Get the recording index for this slot\n"
+        code += "  switch (state) {\n"
+        code += "    case STATE_IDLE:   recIdx = (slot == 0) ? idleRecA : idleRecB; break;\n"
+        code += "    case STATE_ACTIVE: recIdx = (slot == 0) ? activeRecA : activeRecB; break;\n"
+        code += "    case STATE_SLEEP:  recIdx = (slot == 0) ? sleepRecA : sleepRecB; break;\n"
+        code += "    default: recIdx = 0; break;\n"
+        code += "  }\n"
+        code += "  \n"
+        code += "  // Now get positions from the selected recording\n"
         code += "  switch (state) {\n"
         
         for state_name in ['idle', 'active', 'sleep']:
-            if state_name in recordings:
-                code += f"    case STATE_{state_name.upper()}:\n"
+            if state_name not in recordings or not recordings[state_name]:
+                continue
+                
+            rec_list = recordings[state_name]
+            num_recordings = len(rec_list)
+            
+            code += f"    case STATE_{state_name.upper()}:\n"
+            
+            if num_recordings == 1:
+                # Single recording - no switch needed
                 code += f"      duration = {state_name}Duration;\n"
                 code += f"      numSamples = {state_name}NumSamples;\n"
                 code += f"      if (duration > 0) playbackTime = playbackTime % duration;\n"
-                code += f"      // Calculate interpolated position\n"
                 code += f"      samplePos = ((unsigned long)playbackTime * numSamples * 1000UL) / duration;\n"
                 code += f"      sampleIdx = samplePos / 1000;\n"
                 code += f"      if (sampleIdx >= numSamples) sampleIdx = numSamples - 1;\n"
@@ -2733,9 +4405,47 @@ void loop() {
                 code += f"        int next = pgm_read_byte(&{state_name}Data[nextIdx][i]);\n"
                 code += f"        positions[i] = curr + ((next - curr) * fraction) / 1000;\n"
                 code += f"      }}\n"
-                code += f"      break;\n"
+            else:
+                # Multiple recordings - switch on recIdx
+                code += f"      switch (recIdx) {{\n"
+                for rec_idx in range(num_recordings):
+                    suffix = f"_{rec_idx}"
+                    code += f"        case {rec_idx}:\n"
+                    code += f"          duration = {state_name}{suffix}Duration;\n"
+                    code += f"          numSamples = {state_name}{suffix}NumSamples;\n"
+                    code += f"          if (duration > 0) playbackTime = playbackTime % duration;\n"
+                    code += f"          samplePos = ((unsigned long)playbackTime * numSamples * 1000UL) / duration;\n"
+                    code += f"          sampleIdx = samplePos / 1000;\n"
+                    code += f"          if (sampleIdx >= numSamples) sampleIdx = numSamples - 1;\n"
+                    code += f"          nextIdx = (sampleIdx + 1) % numSamples;\n"
+                    code += f"          fraction = samplePos % 1000;\n"
+                    code += f"          for (int i = 0; i < NUM_SERVOS; i++) {{\n"
+                    code += f"            int curr = pgm_read_byte(&{state_name}{suffix}Data[sampleIdx][i]);\n"
+                    code += f"            int next = pgm_read_byte(&{state_name}{suffix}Data[nextIdx][i]);\n"
+                    code += f"            positions[i] = curr + ((next - curr) * fraction) / 1000;\n"
+                    code += f"          }}\n"
+                    code += f"          break;\n"
+                # Default to first recording
+                code += f"        default:\n"
+                code += f"          duration = {state_name}_0Duration;\n"
+                code += f"          numSamples = {state_name}_0NumSamples;\n"
+                code += f"          if (duration > 0) playbackTime = playbackTime % duration;\n"
+                code += f"          samplePos = ((unsigned long)playbackTime * numSamples * 1000UL) / duration;\n"
+                code += f"          sampleIdx = samplePos / 1000;\n"
+                code += f"          if (sampleIdx >= numSamples) sampleIdx = numSamples - 1;\n"
+                code += f"          nextIdx = (sampleIdx + 1) % numSamples;\n"
+                code += f"          fraction = samplePos % 1000;\n"
+                code += f"          for (int i = 0; i < NUM_SERVOS; i++) {{\n"
+                code += f"            int curr = pgm_read_byte(&{state_name}_0Data[sampleIdx][i]);\n"
+                code += f"            int next = pgm_read_byte(&{state_name}_0Data[nextIdx][i]);\n"
+                code += f"            positions[i] = curr + ((next - curr) * fraction) / 1000;\n"
+                code += f"          }}\n"
+                code += f"          break;\n"
+                code += f"      }}\n"
+            
+            code += f"      break;\n"
         
-        # Default case
+        # Default case - return center positions
         code += "    default:\n"
         code += "      for (int i = 0; i < NUM_SERVOS; i++) {\n"
         code += "        positions[i] = 90;\n"
@@ -2759,12 +4469,54 @@ void loop() {
         if not self.is_playing:
             return
         
+        # Initialize crossfade layers (only used in PIR mode)
+        crossfade_layers = None
+        
         # Determine which layers to play and at what speed
         if self.pir_enabled.get():
-            # PIR Mode: Use state-specific recording from library
+            # Check if Markov mode is active
+            if self.pir_markov_enabled.get() and self.pir_markov_initialized:
+                # Markov segment playback
+                current_time = time.time()
+                positions, current_seg = self._update_markov_playback(current_time)
+                
+                if positions:
+                    # Apply positions directly from Markov
+                    for i in range(self.num_fingers):
+                        self.finger_positions[i] = positions[i]
+                    for i in range(self.num_arm_servos):
+                        self.arm_positions[i] = positions[5 + i]
+                    
+                    # Apply state transition blending if needed
+                    if self.pir_blend_factor < 1.0 and self.pir_transition_positions:
+                        bf = self.pir_blend_factor
+                        bf = bf * bf * bf * (bf * (bf * 6.0 - 15.0) + 10.0)  # Smootherstep
+                        
+                        for i in range(self.num_fingers):
+                            old_pos = self.pir_transition_positions['fingers'][i]
+                            new_pos = self.finger_positions[i]
+                            self.finger_positions[i] = old_pos + (new_pos - old_pos) * bf
+                        
+                        for i in range(self.num_arm_servos):
+                            old_pos = self.pir_transition_positions['arm'][i]
+                            new_pos = self.arm_positions[i]
+                            self.arm_positions[i] = old_pos + (new_pos - old_pos) * bf
+                    
+                    # Apply organic sine wobble if enabled
+                    if self.position_wobble.get() > 0:
+                        self.apply_organic_variations()
+                    
+                    self.update_timeline()
+                    return  # Skip normal playback
+            
+            # Normal PIR Mode: Use state-specific recording from library
             pir_layers = self.get_pir_active_layers()
             if not pir_layers:
                 return  # No recording assigned for this state
+            
+            # Handle crossfade between recordings (if enabled and active)
+            if self.pir_is_crossfading and self.pir_crossfade_enabled.get():
+                crossfade_layers = self._get_pir_crossfade_target_layers()
             
             # Use PIR state speed and loaded layers
             speed_mult = self.get_pir_playback_speed()
@@ -2834,64 +4586,133 @@ void loop() {
             duration = layer['duration']
             data = layer['data']
             
-            if not data:
+            if not data or len(data) < 2:
                 continue
             
             # Map current time to this layer's timeline proportionally
             # All layers loop at the same rate for perfect sync
             normalized_time = (elapsed / max_duration) * duration if max_duration > 0 else 0
             
-            # Find current and start positions for blending
-            current_point = None
-            start_point = data[0]  # First frame
-            
-            # Find the closest data point for current time in this layer
-            for point in data:
+            # Find surrounding keyframes for interpolation (smooth playback)
+            start_point = data[0]  # First frame for loop blending
+            prev_point = data[0]
+            next_point = data[-1]
+            for i, point in enumerate(data):
                 if point['time'] >= normalized_time:
-                    current_point = point
+                    next_point = point
+                    prev_point = data[max(0, i - 1)]
                     break
             
-            # If we didn't find a point, use the last one
-            if current_point is None:
-                current_point = data[-1]
+            # Calculate interpolation factor between keyframes
+            time_diff = next_point['time'] - prev_point['time']
+            if time_diff > 0:
+                interp_factor = (normalized_time - prev_point['time']) / time_diff
+                interp_factor = max(0, min(1, interp_factor))  # Clamp to 0-1
+            else:
+                interp_factor = 0
             
             # Apply finger positions ONLY if this layer owns the servo
             for finger_idx in range(self.num_fingers):
                 if finger_owner[finger_idx] == layer_idx:
-                    current_pos = current_point['finger_positions'][finger_idx]
-                    if current_pos is not None:
-                        if is_blending:
-                            start_pos = start_point['finger_positions'][finger_idx]
-                            if start_pos is not None:
-                                blended_pos = current_pos * (1 - blend_factor) + start_pos * blend_factor
-                                self.finger_positions[finger_idx] = blended_pos
-                            else:
-                                self.finger_positions[finger_idx] = current_pos
-                        else:
+                    prev_fingers = prev_point.get('finger_positions', [])
+                    next_fingers = next_point.get('finger_positions', [])
+                    if finger_idx < len(prev_fingers) and finger_idx < len(next_fingers):
+                        prev_val = prev_fingers[finger_idx]
+                        next_val = next_fingers[finger_idx]
+                        if prev_val is not None and next_val is not None:
+                            # Interpolate between keyframes
+                            current_pos = prev_val + (next_val - prev_val) * interp_factor
+                            if is_blending:
+                                start_fingers = start_point.get('finger_positions', [])
+                                if finger_idx < len(start_fingers) and start_fingers[finger_idx] is not None:
+                                    start_pos = start_fingers[finger_idx]
+                                    current_pos = current_pos * (1 - blend_factor) + start_pos * blend_factor
                             self.finger_positions[finger_idx] = current_pos
             
             # Apply arm positions ONLY if this layer owns the servo
             for arm_idx in range(self.num_arm_servos):
                 if arm_owner[arm_idx] == layer_idx:
-                    current_pos = current_point['arm_positions'][arm_idx]
-                    if current_pos is not None:
-                        if is_blending:
-                            start_pos = start_point['arm_positions'][arm_idx]
-                            if start_pos is not None:
-                                blended_pos = current_pos * (1 - blend_factor) + start_pos * blend_factor
-                                self.arm_positions[arm_idx] = blended_pos
-                            else:
-                                self.arm_positions[arm_idx] = current_pos
-                        else:
+                    prev_arm = prev_point.get('arm_positions', [])
+                    next_arm = next_point.get('arm_positions', [])
+                    if arm_idx < len(prev_arm) and arm_idx < len(next_arm):
+                        prev_val = prev_arm[arm_idx]
+                        next_val = next_arm[arm_idx]
+                        if prev_val is not None and next_val is not None:
+                            # Interpolate between keyframes
+                            current_pos = prev_val + (next_val - prev_val) * interp_factor
+                            if is_blending:
+                                start_arm = start_point.get('arm_positions', [])
+                                if arm_idx < len(start_arm) and start_arm[arm_idx] is not None:
+                                    start_pos = start_arm[arm_idx]
+                                    current_pos = current_pos * (1 - blend_factor) + start_pos * blend_factor
                             self.arm_positions[arm_idx] = current_pos
+        
+        # Apply PIR recording crossfade (smooth blend between two recordings within same state)
+        if self.pir_enabled.get() and self.pir_is_crossfading and crossfade_layers:
+            # Store positions from recording A (already computed above)
+            positions_a_fingers = self.finger_positions[:]
+            positions_a_arm = self.arm_positions[:]
+            
+            # Compute interpolated positions from recording B (crossfade target)
+            for layer in crossfade_layers:
+                duration = layer['duration']
+                data = layer['data']
+                if not data or len(data) < 2:
+                    continue
+                
+                normalized_time = (elapsed / max_duration) * duration if max_duration > 0 else 0
+                
+                # Find surrounding keyframes for interpolation
+                prev_point = data[0]
+                next_point = data[-1]
+                for i, point in enumerate(data):
+                    if point['time'] >= normalized_time:
+                        next_point = point
+                        prev_point = data[max(0, i - 1)]
+                        break
+                
+                # Calculate interpolation factor between keyframes
+                time_diff = next_point['time'] - prev_point['time']
+                if time_diff > 0:
+                    interp_factor = (normalized_time - prev_point['time']) / time_diff
+                    interp_factor = max(0, min(1, interp_factor))  # Clamp to 0-1
+                else:
+                    interp_factor = 0
+                
+                # Interpolate positions within recording B
+                for finger_idx in range(self.num_fingers):
+                    prev_fingers = prev_point.get('finger_positions', [])
+                    next_fingers = next_point.get('finger_positions', [])
+                    if finger_idx < len(prev_fingers) and finger_idx < len(next_fingers):
+                        prev_val = prev_fingers[finger_idx]
+                        next_val = next_fingers[finger_idx]
+                        if prev_val is not None and next_val is not None:
+                            # Interpolate within recording B
+                            pos_b = prev_val + (next_val - prev_val) * interp_factor
+                            pos_a = positions_a_fingers[finger_idx]
+                            # Blend between recordings A and B
+                            self.finger_positions[finger_idx] = pos_a + (pos_b - pos_a) * self.pir_rec_blend_factor
+                
+                for arm_idx in range(self.num_arm_servos):
+                    prev_arm = prev_point.get('arm_positions', [])
+                    next_arm = next_point.get('arm_positions', [])
+                    if arm_idx < len(prev_arm) and arm_idx < len(next_arm):
+                        prev_val = prev_arm[arm_idx]
+                        next_val = next_arm[arm_idx]
+                        if prev_val is not None and next_val is not None:
+                            # Interpolate within recording B
+                            pos_b = prev_val + (next_val - prev_val) * interp_factor
+                            pos_a = positions_a_arm[arm_idx]
+                            # Blend between recordings A and B
+                            self.arm_positions[arm_idx] = pos_a + (pos_b - pos_a) * self.pir_rec_blend_factor
         
         # Apply PIR state transition blending (smooth fade between recordings)
         if self.pir_enabled.get() and self.pir_blend_factor < 1.0 and self.pir_transition_positions:
             # Blend from stored transition positions to current computed positions
             bf = self.pir_blend_factor  # 0.0 = old positions, 1.0 = new positions
             
-            # Use eased blend for smoother feel (smooth step)
-            bf = bf * bf * (3 - 2 * bf)  # Hermite interpolation
+            # Use smootherstep for very smooth state transitions (barely noticeable)
+            bf = bf * bf * bf * (bf * (bf * 6.0 - 15.0) + 10.0)  # Ken Perlin's smootherstep
             
             for i in range(self.num_fingers):
                 old_pos = self.pir_transition_positions['fingers'][i]
@@ -2903,8 +4724,8 @@ void loop() {
                 new_pos = self.arm_positions[i]
                 self.arm_positions[i] = old_pos + (new_pos - old_pos) * bf
         
-        # Apply organic variations if in Markov mode
-        if self.markov_mode:
+        # Apply organic variations if in Markov mode OR PIR mode (for organic feel)
+        if self.markov_mode or (self.pir_enabled.get() and self.position_wobble.get() > 0):
             self.apply_organic_variations()
     
     def apply_organic_variations(self):
@@ -3254,7 +5075,12 @@ void loop() {
         
         # Try to reconnect
         try:
-            self.hand_controller = HandExpressionController(port=self.default_port, clean_output=True)
+            self.hand_controller = HandExpressionController(
+                port=self.default_port, 
+                clean_output=True,
+                min_angle=self.hardware_config['global_min_angle'],
+                max_angle=self.hardware_config['global_max_angle']
+            )
             # Test the connection by sending a center command
             self.hand_controller.set_hand_positions([90]*8)
             print(f"✅ Arduino reconnected on {self.default_port}")
@@ -3611,7 +5437,7 @@ void loop() {
  * Pin {pin_mapping[6]} -> Elbow (servo 6)
  * Pin {pin_mapping[7]} -> Wrist (servo 7)
  * 
- * Range: {min_angle}-{max_angle} degrees. Reversed servos: {reversed_names}
+ * Stored positions already constrained during recording
  */
 
 #include <Servo.h>
@@ -3818,7 +5644,7 @@ void loop() {
         
         # Create configuration dialog
         dialog = tk.Toplevel(self.root)
-        dialog.title("Markov Chain Export Configuration")
+        dialog.title("Multi-Phrase Export Configuration")
         dialog.geometry("500x400")
         dialog.configure(bg=self.colors['bg_main'])
         dialog.transient(self.root)
@@ -3888,11 +5714,11 @@ void loop() {
                 with open(filepath, 'w') as f:
                     f.write(code)
                 
-                tkinter.messagebox.showinfo("Markov Export Successful", 
-                                          f"Arduino code with Markov chain exported to:\n{filepath}\n\n" +
+                tkinter.messagebox.showinfo("Multi-Phrase Export Successful", 
+                                          f"Arduino code with multi-phrase transitions exported to:\n{filepath}\n\n" +
                                           f"Phrases: {len(phrase_files) + 1}\n" +
                                           f"PIR Sensor: {'Enabled' if pir_enable.get() else 'Disabled'}")
-                print(f"🎲 Markov Arduino code exported to {filepath}")
+                print(f"📦 Multi-phrase Arduino code exported to {filepath}")
                 
             except Exception as e:
                 tkinter.messagebox.showerror("Export Failed", f"Failed to export Arduino code:\n{e}")
@@ -3984,7 +5810,7 @@ void loop() {
  * Pin {pin_mapping[6]} -> Elbow (servo 6)
  * Pin {pin_mapping[7]} -> Wrist (servo 7)
  * 
- * Range: {min_angle}-{max_angle} degrees. Reversed servos: {reversed_names}
+ * Stored positions already constrained during recording
  */
 
 #include <Servo.h>
@@ -4530,6 +6356,20 @@ void playPhrase(int phraseNum, unsigned long elapsed) {
             min(canvas_w // 2, 190), canvas_h - 18,
             text="Mode: Cursor Wave Control",
             font=('Arial', 9, 'bold'), fill='#2196F3'
+        )
+        
+        # Recording indicator (hidden by default)
+        self.rec_indicator_bg = self.canvas.create_rectangle(
+            canvas_w - 110, 8, canvas_w - 10, 32,
+            fill='#ff0000', outline='#cc0000', width=2, state='hidden'
+        )
+        self.rec_indicator_dot = self.canvas.create_oval(
+            canvas_w - 105, 13, canvas_w - 93, 25,
+            fill='#ffffff', outline='#ffffff', state='hidden'
+        )
+        self.rec_indicator_text = self.canvas.create_text(
+            canvas_w - 55, 20,
+            text="REC", font=('Arial', 11, 'bold'), fill='#ffffff', state='hidden'
         )
     
     def update_visual_feedback(self):

@@ -13,12 +13,15 @@ from typing import Optional
 class HandExpressionController:
     """Standalone hand expression controller with exact same API as original."""
     
-    def __init__(self, port: str = "COM3", baudrate: int = 9600, clean_output: bool = True):
+    def __init__(self, port: str = "COM3", baudrate: int = 9600, clean_output: bool = True, 
+                 min_angle: int = 0, max_angle: int = 180):
         self.port = port
         self.baudrate = baudrate
         self.clean_output = clean_output
         self.serial_connection = None
         self.manual_override = False
+        self.min_angle = min_angle
+        self.max_angle = max_angle
         
         # Command throttling system (matches original)
         self.last_command_time = 0.0
@@ -65,24 +68,9 @@ class HandExpressionController:
         # Convert to servo dictionary for position change detection (8 servos: 5 fingers + 3 arm)
         finger_positions = {}
         for i, angle in enumerate(positions):
-            # Wrist servo (index 7) gets full range, others get limited range
-            if i == 7:  # Wrist servo
-                # Use full servo range (0-180°) for wrist
-                arduino_position = max(0, min(180, int(angle)))
-            else:
-                # Clamp other servos to safe range (10-170°)
-                arduino_min = 10
-                arduino_max = 170
-                arduino_center = 90
-                arduino_range = 160
-                
-                # Convert from 0-180° system to Arduino's 10-170° system
-                offset_from_center = angle - 90.0
-                arduino_offset = (offset_from_center / 90.0) * (arduino_range / 2.0)
-                arduino_position = arduino_center + arduino_offset
-                arduino_position = max(arduino_min, min(arduino_max, arduino_position))
-                arduino_position = int(arduino_position)
-            
+            # Map from logical 0-180 to hardware min_angle-max_angle
+            arduino_position = int((angle / 180.0) * (self.max_angle - self.min_angle) + self.min_angle)
+            arduino_position = max(self.min_angle, min(self.max_angle, arduino_position))
             finger_positions[f"finger{i}"] = arduino_position
         
         # Position change detection: Only send if positions changed significantly

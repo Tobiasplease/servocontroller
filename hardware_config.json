@@ -4,12 +4,60 @@
   "serial_port": "COM4",
   "baud_rate": 9600,
   "global_min_angle": 0,
-  "global_max_angle": 45,
-  "pin_mapping": [12, 11, 10, 9, 8, 7, 6, 5],
-  "servo_names": ["Thumb", "Index", "Middle", "Ring", "Pinky", "Shoulder", "Elbow", "Wrist"],
-  "reversed_servos": [2, 3],
+  "global_max_angle": 180,
+  "pin_mapping": [
+    12,
+    11,
+    10,
+    9,
+    8,
+    7,
+    6,
+    5
+  ],
+  "servo_names": [
+    "Thumb",
+    "Index",
+    "Middle",
+    "Ring",
+    "Pinky",
+    "Shoulder",
+    "Elbow",
+    "Wrist"
+  ],
+  "reversed_servos": [],
   "per_servo_limits": [
-    [0, 180], [0, 180], [0, 180], [0, 180],
-    [0, 180], [0, 180], [0, 180], [0, 180]
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ]
   ]
 }
