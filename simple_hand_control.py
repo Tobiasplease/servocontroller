@@ -234,6 +234,7 @@ class SimpleHandControl:
         
         # Create GUI
         self.create_interface()
+        self.update_connection_status()
         
         # Populate PIR recording dropdowns from library
         self.update_pir_recording_combos()
@@ -395,6 +396,13 @@ class SimpleHandControl:
                  fg_color='#c0c0c0', text_color='black',
                  hover_color='#e0e0e0',
                  corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
+
+        ctk.CTkButton(tools_frame, text="Disconnect", 
+             command=self.disconnect_arduino,
+             font=('Arial', 10), width=85,
+             fg_color='#c0c0c0', text_color='black',
+             hover_color='#e0e0e0',
+             corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
         
         ctk.CTkButton(tools_frame, text="Clear All", 
                  command=self.clear_layers,
@@ -776,6 +784,7 @@ class SimpleHandControl:
         
         # Hardware preview toggle
         tk.Checkbutton(pir_markov_frame, text="HW Preview", variable=self.pir_markov_hardware_preview,
+                      command=self._on_markov_hw_preview_toggle,
                       bg=self.colors['bg_frame'], fg=self.colors['text_main'],
                       selectcolor=self.colors['bg_dark'], font=('Arial', 8),
                       activebackground=self.colors['bg_frame']).pack(side=tk.LEFT, padx=(15, 0))
@@ -2322,6 +2331,11 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             self.pir_last_motion_time = time.time()  # Start fresh
             self.pir_simulate_btn.configure(state='normal')
             self.update_pir_state_display()
+
+            # Randomize starting recording per state so we don't bias index 0.
+            for state_name in ['idle', 'active', 'sleep']:
+                self._randomize_pir_state_recording(state_name)
+            self.pir_crossfade_target_idx = self.pir_recording_index.get(self.pir_state, 0)
             
             # Initialize crossfade system
             self._schedule_next_crossfade()
@@ -2344,6 +2358,20 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             self.pir_rec_label.config(text="")
             self.pir_timer_label.config(text="")
             print("⚪ PIR Mode disabled")
+
+    def _randomize_pir_state_recording(self, state):
+        """Pick a random current recording index for the given PIR state."""
+        import random
+        rec_lists = {
+            'idle': self.pir_idle_recordings,
+            'active': self.pir_active_recordings,
+            'sleep': self.pir_sleep_recordings
+        }
+        rec_list = rec_lists.get(state, [])
+        if not rec_list:
+            self.pir_recording_index[state] = 0
+            return
+        self.pir_recording_index[state] = random.randrange(len(rec_list))
     
     def check_pir_from_arduino(self):
         """Check for PIR motion events from Arduino over serial."""
@@ -2459,6 +2487,9 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         
         # Update display if state changed
         if old_state != self.pir_state:
+            # Randomize starting recording for the new state immediately.
+            self._randomize_pir_state_recording(self.pir_state)
+            self.pir_crossfade_target_idx = self.pir_recording_index.get(self.pir_state, 0)
             self.update_pir_state_display()
             # Reset crossfade timing for new state
             self._schedule_next_crossfade()
@@ -2642,6 +2673,30 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             # Clear info display
             if hasattr(self, 'pir_markov_info_label'):
                 self.pir_markov_info_label.config(text="")
+
+    def _on_markov_hw_preview_toggle(self):
+        """Handle HW Preview toggle and make mode changes immediately visible."""
+        use_hw = self.pir_markov_hardware_preview.get()
+        mode_name = "HW preview" if use_hw else "full preview"
+        print(f"[MARKOV] {mode_name} enabled")
+
+        # If Markov is running, ensure data/state matches new preview mode immediately.
+        if self.pir_markov_enabled.get():
+            if not self.pir_markov_initialized:
+                self._rebuild_markov_segments()
+            elif use_hw:
+                # Rebuild hardware preview tables if missing/stale.
+                has_hw = any(self.pir_markov_hw_segments.get(s, []) for s in ['idle', 'active', 'sleep'])
+                if not has_hw:
+                    self._build_hardware_preview_data()
+
+            # Restart segment playback to avoid carrying stale interpolation state.
+            self.pir_current_segment_idx = 0
+            self.pir_segment_start_time = time.time()
+            self.pir_prev_segment_end_positions = None
+            self.pir_needs_blend = False
+
+        self._update_markov_info_display()
     
     def _rebuild_markov_segments(self):
         """Build segment pool and transition matrix from all PIR recordings."""
@@ -2749,18 +2804,18 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
                     rec_counts[rec_name] = {'idle': 0, 'active': 0, 'sleep': 0}
                 rec_counts[rec_name][state_name] += 1
         
-        # Calculate Arduino memory size
-        # Arduino export uses: 12 samples/segment × 8 servos = 96 bytes/segment
-        # Plus sparse transitions: 4 transitions × 2 bytes = 8 bytes/segment
-        # Total: 104 bytes per segment
-        samples_per_seg = 12  # Matches export
-        bytes_per_segment = samples_per_seg * 8 + 8  # data + sparse transitions
+        # Calculate Arduino memory size (matches export settings).
+        samples_per_seg = self.HARDWARE_SAMPLES_PER_SEG
+        top_k = self.HARDWARE_TOP_K_TRANSITIONS
+        bytes_per_segment = samples_per_seg * 8 + (top_k * 2)  # data + sparse transitions
         total_bytes = total_segs * bytes_per_segment
         total_kb = total_bytes / 1024
         
         # Format info text
         segment_length = self.pir_markov_segment_length.get()
         lines = []
+        mode_label = "HW" if self.pir_markov_hardware_preview.get() else "FULL"
+        lines.append(f"Mode: {mode_label} preview")
         lines.append(f"Segments: {total_segs} ({segment_length}s each, {samples_per_seg} samples)")
         
         # Per-recording breakdown
@@ -3271,6 +3326,21 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         
         # Count total recordings per state for comments
         rec_counts = {s: len(recs) for s, recs in recordings.items()}
+
+        # Startup pose: use first sample from first available recording (prefer IDLE).
+        startup_positions = [90] * 8
+        startup_layers = None
+        for state_name in ['idle', 'active', 'sleep']:
+            state_recs = recordings.get(state_name, [])
+            if state_recs:
+                startup_layers = state_recs[0].get('layers', [])
+                if startup_layers:
+                    break
+        if startup_layers:
+            merged_startup = self._merge_layers_to_samples(startup_layers, sample_rate=50)
+            if merged_startup:
+                startup_positions = [int(round(v)) for v in merged_startup[0]]
+        startup_positions_str = ', '.join(str(v) for v in startup_positions)
         
         code = f'''// PIR State Machine - Auto-generated by Hand Control Interface
 // Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -3302,6 +3372,9 @@ const unsigned long BLEND_TIME = {blend_time_ms}UL;
 
 // Servo pin mapping
 const int servoPins[NUM_SERVOS] = {{{', '.join(map(str, pins))}}};
+
+// Startup pose (logical 0-180, before hardware mapping)
+const int startupPositions[NUM_SERVOS] = {{{startup_positions_str}}};
 
 // Reversed servo flags
 const bool servoReversed[NUM_SERVOS] = {{{', '.join(['true' if i in reversed_servos else 'false' for i in range(8)])}}};
@@ -3337,13 +3410,14 @@ const unsigned long MAX_CROSSFADE_INTERVAL = {crossfade_interval_max}UL; // Max 
 const unsigned long MIN_CROSSFADE_DURATION = {crossfade_duration_min}UL;  // Min crossfade length
 const unsigned long MAX_CROSSFADE_DURATION = {crossfade_duration_max}UL;  // Max crossfade length
 const bool CROSSFADE_ENABLED = {crossfade_enabled};  // Enable organic crossfading between recordings
+const int MAX_STEP_PER_UPDATE = 2;  // Slew-rate limit to reduce twitchy jumps
 
 // Organic sine wave wobble (adds life-like micro-movements)
 const float WOBBLE_AMOUNT = {wobble_amount};  // Max degrees of wobble (0 = disabled)
 float phaseOffsets[NUM_SERVOS];  // Random phase offset per servo for variety
 
 // Current servo positions (for blending)
-int currentPositions[NUM_SERVOS] = {{90, 90, 90, 90, 90, 90, 90, 90}};
+int currentPositions[NUM_SERVOS] = {{{startup_positions_str}}};
 int transitionFromPositions[NUM_SERVOS];
 
 // ==================== SERVO OBJECTS ====================
@@ -3588,14 +3662,32 @@ void updateServos() {
     targetPositions[i] = positionsA[i] + (int)((positionsB[i] - positionsA[i]) * crossfadeFactor);
   }
   
-  // If transitioning between states, blend from old positions
+    // If transitioning between states, blend from old positions
+    int desiredPositions[NUM_SERVOS];
   if (stateBlendFactor < 1.0) {
     for (int i = 0; i < NUM_SERVOS; i++) {
-      currentPositions[i] = blendPositions(transitionFromPositions[i], targetPositions[i], stateBlendFactor);
+            desiredPositions[i] = blendPositions(transitionFromPositions[i], targetPositions[i], stateBlendFactor);
     }
   } else {
     for (int i = 0; i < NUM_SERVOS; i++) {
-      currentPositions[i] = targetPositions[i];
+            desiredPositions[i] = targetPositions[i];
+        }
+    }
+
+    // Apply slew-rate limiting to avoid abrupt per-frame jumps.
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        int delta = desiredPositions[i] - currentPositions[i];
+        if (delta > MAX_STEP_PER_UPDATE) delta = MAX_STEP_PER_UPDATE;
+        if (delta < -MAX_STEP_PER_UPDATE) delta = -MAX_STEP_PER_UPDATE;
+        currentPositions[i] += delta;
+        if (currentPositions[i] < 0) currentPositions[i] = 0;
+        if (currentPositions[i] > 180) currentPositions[i] = 180;
+    }
+
+    // If still in state transition, update blend source so we don't get re-jumps.
+    if (stateBlendFactor < 1.0) {
+        for (int i = 0; i < NUM_SERVOS; i++) {
+            transitionFromPositions[i] = currentPositions[i];
     }
   }
   
@@ -3647,8 +3739,46 @@ void setup() {
   // Attach servos
   for (int i = 0; i < NUM_SERVOS; i++) {
     servos[i].attach(servoPins[i]);
-    servos[i].write(90);  // Center position
+        servos[i].write(applyServoLimits(startupPositions[i], i));
+        currentPositions[i] = startupPositions[i];
+        transitionFromPositions[i] = startupPositions[i];
   }
+
+    // Randomize initial recording selection per state (avoid bias to recording 0)
+    #ifdef NUM_IDLE_RECORDINGS
+    if (NUM_IDLE_RECORDINGS > 0) {
+        idleRecA = random(NUM_IDLE_RECORDINGS);
+        idleRecB = idleRecA;
+        if (NUM_IDLE_RECORDINGS > 1) {
+            do { idleRecB = random(NUM_IDLE_RECORDINGS); } while (idleRecB == idleRecA);
+        }
+    }
+    #endif
+
+    #ifdef NUM_ACTIVE_RECORDINGS
+    if (NUM_ACTIVE_RECORDINGS > 0) {
+        activeRecA = random(NUM_ACTIVE_RECORDINGS);
+        activeRecB = activeRecA;
+        if (NUM_ACTIVE_RECORDINGS > 1) {
+            do { activeRecB = random(NUM_ACTIVE_RECORDINGS); } while (activeRecB == activeRecA);
+        }
+    }
+    #endif
+
+    #ifdef NUM_SLEEP_RECORDINGS
+    if (NUM_SLEEP_RECORDINGS > 0) {
+        sleepRecA = random(NUM_SLEEP_RECORDINGS);
+        sleepRecB = sleepRecA;
+        if (NUM_SLEEP_RECORDINGS > 1) {
+            do { sleepRecB = random(NUM_SLEEP_RECORDINGS); } while (sleepRecB == sleepRecA);
+        }
+    }
+    #endif
+
+    // Schedule first crossfade at a random interval.
+    nextCrossfadeTime = millis() + random(MIN_CROSSFADE_INTERVAL, MAX_CROSSFADE_INTERVAL);
+    isCrossfading = false;
+    crossfadeFactor = 0.0;
   
   // Initialize timing
   lastMotionTime = millis();
@@ -3794,6 +3924,15 @@ void loop() {
         trans_bytes = total_segs * TOP_K_TRANSITIONS * 2  # idx + prob per transition
         total_data_kb = (seg_bytes + trans_bytes) / 1024
         print(f"[MARKOV EXPORT] {total_segs} segments, ~{total_data_kb:.1f}KB data")
+
+        # Startup pose from first available segment start (prefer IDLE).
+        startup_positions = [90] * 8
+        for state_name in ['idle', 'active', 'sleep']:
+            segs = all_segments.get(state_name, [])
+            if segs:
+                startup_positions = [int(round(v)) for v in segs[0]['start']]
+                break
+        startup_positions_str = ', '.join(str(v) for v in startup_positions)
         
         # Generate code
         code = f'''// PIR Markov State Machine - Auto-generated
@@ -3815,6 +3954,7 @@ void loop() {
 
 const int servoPins[NUM_SERVOS] = {{{', '.join(map(str, pins))}}};
 const bool servoReversed[NUM_SERVOS] = {{{', '.join('true' if i in reversed_servos else 'false' for i in range(8))}}};
+const int startupPositions[NUM_SERVOS] = {{{startup_positions_str}}};
 const int SERVO_MIN = {min_angle};
 const int SERVO_MAX = {max_angle};
 
@@ -3824,6 +3964,7 @@ const unsigned long SLEEP_TIMEOUT = {sleep_timeout_ms}UL;
 const unsigned long STATE_BLEND_TIME = {blend_time_ms}UL;
 // const unsigned long SEGMENT_DURATION = {segment_length_ms}UL;  // Now variable per segment
 const unsigned long SEGMENT_BLEND_TIME = {markov_blend_ms}UL;
+const int MAX_STEP_PER_UPDATE = 2;  // Slew-rate limit for smoother transitions
 
 // Organic wobble
 const float WOBBLE_AMOUNT = {wobble_amount};
@@ -4111,16 +4252,34 @@ void updateServos() {
     needsBlend = false;
   }
   
-  // Apply state transition blend
+    // Apply state transition blend
+    int desiredPositions[NUM_SERVOS];
   if (stateBlendFactor < 1.0) {
     for (int i = 0; i < NUM_SERVOS; i++) {
-      currentPositions[i] = transitionFromPositions[i] + (int)((targetPositions[i] - transitionFromPositions[i]) * stateBlendFactor);
+            desiredPositions[i] = transitionFromPositions[i] + (int)((targetPositions[i] - transitionFromPositions[i]) * stateBlendFactor);
     }
   } else {
     for (int i = 0; i < NUM_SERVOS; i++) {
-      currentPositions[i] = targetPositions[i];
+            desiredPositions[i] = targetPositions[i];
     }
   }
+
+    // Apply slew-rate limiting to reduce twitchiness at segment/state boundaries.
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        int delta = desiredPositions[i] - currentPositions[i];
+        if (delta > MAX_STEP_PER_UPDATE) delta = MAX_STEP_PER_UPDATE;
+        if (delta < -MAX_STEP_PER_UPDATE) delta = -MAX_STEP_PER_UPDATE;
+        currentPositions[i] += delta;
+        if (currentPositions[i] < 0) currentPositions[i] = 0;
+        if (currentPositions[i] > 180) currentPositions[i] = 180;
+    }
+
+    // Keep transition source in sync while blending to avoid discontinuities.
+    if (stateBlendFactor < 1.0) {
+        for (int i = 0; i < NUM_SERVOS; i++) {
+            transitionFromPositions[i] = currentPositions[i];
+        }
+    }
   
   // Apply organic wobble and write to servos
   float t = millis() / 1000.0;
@@ -4149,15 +4308,17 @@ void setup() {
   for (int i = 0; i < NUM_SERVOS; i++) {
     phaseOffsets[i] = random(0, 628) / 100.0;
     servos[i].attach(servoPins[i]);
-    servos[i].write(90);
-    currentPositions[i] = 90;
+        servos[i].write(applyServoLimits(startupPositions[i], i));
+        currentPositions[i] = startupPositions[i];
+        transitionFromPositions[i] = startupPositions[i];
   }
   
   lastMotionTime = millis();
   stateStartTime = millis();
   transitionStartTime = millis();
   segmentStartTime = millis();
-  currentSegment = random(getNumSegments(STATE_IDLE));
+    int idleSegs = getNumSegments(STATE_IDLE);
+    currentSegment = (idleSegs > 0) ? 0 : 0;
   needsBlend = false;
   
   Serial.println("Ready - Markov segment mode (variable durations)");
@@ -5068,10 +5229,14 @@ void loop() {
         # Close existing connection if any
         if self.hand_controller:
             try:
-                self.hand_controller.serial_connection.close()
-                print("🔌 Closed existing connection")
-            except:
+                ser = getattr(self.hand_controller, 'serial_connection', None)
+                if ser and getattr(ser, 'is_open', False):
+                    ser.close()
+                    print("🔌 Closed existing connection")
+            except Exception:
                 pass
+            self.hand_controller = None
+            self.update_connection_status()
         
         # Try to reconnect
         try:
@@ -5084,11 +5249,48 @@ void loop() {
             # Test the connection by sending a center command
             self.hand_controller.set_hand_positions([90]*8)
             print(f"✅ Arduino reconnected on {self.default_port}")
+            self.update_connection_status()
             tkinter.messagebox.showinfo("Connected", f"Arduino reconnected successfully on {self.default_port}!")
         except Exception as e:
             self.hand_controller = None
+            self.update_connection_status()
             print(f"❌ Reconnect failed: {e}")
             tkinter.messagebox.showerror("Connection Failed", f"Failed to reconnect Arduino:\n{e}\n\nMake sure Arduino is plugged in and on {self.default_port}!")
+
+    def disconnect_arduino(self):
+        """Disconnect from Arduino and release the COM port."""
+        if not self.hand_controller:
+            self.update_connection_status()
+            tkinter.messagebox.showinfo("Disconnected", "No active Arduino connection.")
+            return
+
+        try:
+            ser = getattr(self.hand_controller, 'serial_connection', None)
+            if ser and getattr(ser, 'is_open', False):
+                ser.close()
+                print("🔌 Arduino disconnected (COM port released)")
+            self.hand_controller = None
+            self.update_connection_status()
+            tkinter.messagebox.showinfo("Disconnected", "Arduino disconnected. COM port released.")
+        except Exception as e:
+            self.hand_controller = None
+            self.update_connection_status()
+            print(f"❌ Disconnect failed: {e}")
+            tkinter.messagebox.showerror("Disconnect Failed", f"Failed to disconnect Arduino:\n{e}")
+
+    def update_connection_status(self):
+        """Update top-right connection indicator."""
+        if not hasattr(self, 'connection_label'):
+            return
+
+        ser = getattr(self.hand_controller, 'serial_connection', None) if self.hand_controller else None
+        is_connected = bool(ser and getattr(ser, 'is_open', False))
+
+        if is_connected:
+            port = getattr(ser, 'port', self.default_port)
+            self.connection_label.config(text=f"● Connected ({port})", fg='#00aa00')
+        else:
+            self.connection_label.config(text="● Disconnected", fg='#aa0000')
     
     def capture_keyframe(self):
         """Capture current servo positions as a keyframe."""
@@ -5361,11 +5563,17 @@ void loop() {
                 if arm_idx < 3:
                     servo_owner[5 + arm_idx] = layer_idx
         
-        # Extract keyframes for all layers WITH TIME NORMALIZATION
+        # Build startup pose from first recorded value for each servo owner.
+        # This avoids the awkward hardcoded 90deg boot pose.
+        startup_positions = [90] * 8
+
+        # Extract frames for all layers WITH TIME NORMALIZATION
         all_layer_keyframes = []
         for layer in self.recorded_layers:
             movements = sorted(layer['data'], key=lambda x: x['time'])
-            keyframes = self._extract_keyframes(movements)
+            # Preserve full timing/shape for standard .ino export.
+            # Keyframe compression + interpolation can feel slower/smoother than recorded.
+            keyframes = [dict(m) for m in movements]
             
             # TIME NORMALIZE: Scale layer duration to match global loop duration
             # This ensures layers recorded at different durations sync properly
@@ -5382,6 +5590,22 @@ void loop() {
                 'duration': layer['duration'],
                 'keyframes': keyframes
             })
+
+        # Resolve startup position from the first keyframe of each owning layer.
+        for servo_idx in range(8):
+            owner = servo_owner[servo_idx]
+            if owner < 0 or owner >= len(all_layer_keyframes):
+                continue
+
+            owner_keyframes = all_layer_keyframes[owner]['keyframes']
+            for kf in owner_keyframes:
+                if servo_idx < 5:
+                    pos = kf['finger_positions'][servo_idx]
+                else:
+                    pos = kf['arm_positions'][servo_idx - 5]
+                if pos is not None:
+                    startup_positions[servo_idx] = int(pos)
+                    break
         
         # Adjust duration by playback speed (faster speed = shorter duration)
         adjusted_duration = max_duration / playback_speed
@@ -5410,6 +5634,7 @@ void loop() {
         
         # Build pin mapping string
         pin_str = ', '.join([str(p) for p in pin_mapping])
+        startup_positions_str = ', '.join(str(p) for p in startup_positions)
         
         code = f'''/*
  * 8-Servo Hand Control - Generated Movement Code (SIMULTANEOUS PLAYBACK)
@@ -5461,6 +5686,9 @@ void writeServo(int index, int pos) {{
 // Timing
 unsigned long loopStartTime;
 unsigned long loopDuration = {int(adjusted_duration * 1000)}; // milliseconds (adjusted for {playback_speed:.1f}x speed)
+
+// Startup pose (matches first recorded frame per owned servo)
+const int startupPositions[8] = {{{startup_positions_str}}};
 
 // Layer data structures
 '''
@@ -5520,7 +5748,7 @@ void setup() {
   // Attach servos
   for(int i = 0; i < 8; i++) {
     servo[i].attach(servoPins[i]);
-    writeServo(i, 90);  // Center position
+        writeServo(i, startupPositions[i]);
   }
   
   delay(1000);
@@ -5768,6 +5996,35 @@ void loop() {
                 print(f"❌ Failed to load phrase from {filepath}: {e}")
         
         num_phrases = len(phrases)
+
+        # Startup pose for Markov export: match first phrase's first recorded pose
+        # (per servo ownership, last layer wins) instead of forcing center 90deg.
+        startup_positions = [90] * 8
+        if phrases:
+            first_phrase_layers = phrases[0].get('layers', [])
+            startup_owner = [-1] * 8
+            for layer_idx, layer in enumerate(first_phrase_layers):
+                recorded_servos = layer.get('recorded_servos', {'fingers': set(), 'arm': set()})
+                for finger_idx in recorded_servos.get('fingers', []):
+                    if finger_idx < 5:
+                        startup_owner[finger_idx] = layer_idx
+                for arm_idx in recorded_servos.get('arm', []):
+                    if arm_idx < 3:
+                        startup_owner[5 + arm_idx] = layer_idx
+
+            for servo_idx in range(8):
+                owner = startup_owner[servo_idx]
+                if owner < 0 or owner >= len(first_phrase_layers):
+                    continue
+                layer_data = sorted(first_phrase_layers[owner].get('data', []), key=lambda x: x['time'])
+                for movement in layer_data:
+                    if servo_idx < 5:
+                        pos = movement['finger_positions'][servo_idx]
+                    else:
+                        pos = movement['arm_positions'][servo_idx - 5]
+                    if pos is not None:
+                        startup_positions[servo_idx] = int(pos)
+                        break
         
         # Build simple uniform transition matrix (each phrase can transition to any other with equal probability)
         # In the future, this could analyze temporal patterns to build smarter transitions
@@ -5788,6 +6045,7 @@ void loop() {
         
         # Build pin mapping string
         pin_str = ', '.join([str(p) for p in pin_mapping])
+        startup_positions_str = ', '.join(str(p) for p in startup_positions)
         
         code = f'''/*
  * 8-Servo Hand Control - Markov Chain Phrase System
@@ -5818,6 +6076,9 @@ void loop() {
 // Servo objects
 Servo servo[8];
 int servoPins[8] = {{{pin_str}}};
+
+// Startup pose (matches first phrase's first recorded frame)
+const int startupPositions[8] = {{{startup_positions_str}}};
 
 // Range configuration (from hardware preset: {self.hardware_config['name']})
 const int MIN_ANGLE = {min_angle};
@@ -5964,7 +6225,7 @@ const uint8_t transitionMatrix[NUM_PHRASES][NUM_PHRASES] PROGMEM = {{
   // Attach servos
   for(int i = 0; i < 8; i++) {
     servo[i].attach(servoPins[i]);
-    writeServo(i, 90);  // Center position
+        writeServo(i, startupPositions[i]);
   }
   
 '''

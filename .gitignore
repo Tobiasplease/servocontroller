@@ -1,0 +1,24 @@
+# Python cache/env
+__pycache__/
+*.py[cod]
+.venv/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Runtime state
+current_emotion.json
+hand_controller_state.json
+
+# Generated recordings/exports
+hand_recording_*.json
+hand_movements_20*.ino
+hand_movements_20*/
+hand_markov_20*.ino
+pir_crossfade_20*.ino
+pir_markov_20*.ino
+pir_markov_20*/
+pir_state_machine_20*.ino
+pir_state_machine_20*/
