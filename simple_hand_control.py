@@ -79,6 +79,7 @@ class SimpleHandControl:
             'description': 'Standard 8-servo hand controller',
             'serial_port': 'COM4',
             'baud_rate': 9600,
+            'pir_pin': 2,  # PIR sensor digital pin
             'global_min_angle': 0,
             'global_max_angle': 45,
             'pin_mapping': [12, 11, 10, 9, 8, 7, 6, 5],
@@ -145,6 +146,9 @@ class SimpleHandControl:
         self.captured_keyframes = []
         self.keyframe_capture_start = None
         
+        # Movement Chain System Mode ('continuous' or 'sensor')
+        self.chain_mode = tk.StringVar(value='continuous')  # continuous=loop forever, sensor=PIR reactive
+
         # PIR State Machine System
         self.pir_enabled = tk.BooleanVar(value=False)  # PIR testing mode enabled
         self.pir_simulated_motion = False  # Simulated motion detection (for testing)
@@ -164,6 +168,9 @@ class SimpleHandControl:
         self.pir_crossfade_duration_min = tk.IntVar(value=8)   # Min crossfade length (seconds)
         self.pir_crossfade_duration_max = tk.IntVar(value=15)   # Max crossfade length (seconds)
         
+        # Recording assignments for continuous loop mode (shared library)
+        self.continuous_recordings = []  # List of recording names for continuous loop
+
         # Recording assignments for each state (list of filenames from pir_recordings/ folder)
         self.pir_idle_recordings = []  # List of recording names for IDLE state
         self.pir_active_recordings = []  # List of recording names for ACTIVE state
@@ -238,7 +245,10 @@ class SimpleHandControl:
         
         # Populate PIR recording dropdowns from library
         self.update_pir_recording_combos()
-        
+
+        # Initialize chain mode UI visibility (show continuous by default)
+        self.on_chain_mode_change()
+
         # Start control loop
         self.last_send_time = 0
         self.send_interval = 0.05  # 20Hz
@@ -362,20 +372,29 @@ class SimpleHandControl:
         # === EXPORT GROUP ===
         export_frame = tk.Frame(toolbar, bg=self.colors['bg_main'])
         export_frame.pack(side=tk.LEFT, padx=5, pady=5)
+
+        export_button_row = tk.Frame(export_frame, bg=self.colors['bg_main'])
+        export_button_row.pack(fill=tk.X)
         
-        ctk.CTkButton(export_frame, text="Export .ino", 
+        ctk.CTkButton(export_button_row, text="Export .ino (Full)", 
                  command=self.export_arduino_code,
-                 font=('Arial', 10), width=85,
+             font=('Arial', 10), width=130,
                  fg_color='#c0c0c0', text_color='black',
                  hover_color='#e0e0e0',
                  corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
         
-        ctk.CTkButton(export_frame, text="Multi-Phrase", 
+        ctk.CTkButton(export_button_row, text="Multi-Phrase", 
                  command=self.export_markov_arduino,
                  font=('Arial', 10), width=90,
                  fg_color='#c0c0c0', text_color='black',
                  hover_color='#e0e0e0',
                  corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
+
+        tk.Label(export_frame,
+             text="Full detail export",
+             bg=self.colors['bg_main'],
+             fg=self.colors['text_dim'],
+             font=('Arial', 7)).pack(anchor='w', padx=3, pady=(1, 0))
         
         add_separator()
         
@@ -552,17 +571,27 @@ class SimpleHandControl:
         self.config_port_var = tk.StringVar(value=self.hardware_config['serial_port'])
         tk.Entry(port_row, textvariable=self.config_port_var, width=10, font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
         
+        # PIR pin
+        pir_row = tk.Frame(self.hw_config_content, bg=self.colors['bg_frame'])
+        pir_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(pir_row, text="PIR Pin:", bg=self.colors['bg_frame'],
+                fg=self.colors['text_main'], font=('Arial', 8), width=12, anchor='w').pack(side=tk.LEFT)
+        self.config_pir_pin_var = tk.IntVar(value=self.hardware_config.get('pir_pin', 2))
+        tk.Entry(pir_row, textvariable=self.config_pir_pin_var, width=5, font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
+        tk.Label(pir_row, text="(digital pin for PIR sensor)", bg=self.colors['bg_frame'],
+                fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
+
         # Global angle range
         range_row = tk.Frame(self.hw_config_content, bg=self.colors['bg_frame'])
         range_row.pack(fill=tk.X, padx=5, pady=2)
-        tk.Label(range_row, text="Angle Range:", bg=self.colors['bg_frame'], 
+        tk.Label(range_row, text="Angle Range:", bg=self.colors['bg_frame'],
                 fg=self.colors['text_main'], font=('Arial', 8), width=12, anchor='w').pack(side=tk.LEFT)
         self.config_min_var = tk.IntVar(value=self.hardware_config['global_min_angle'])
         self.config_max_var = tk.IntVar(value=self.hardware_config['global_max_angle'])
         tk.Entry(range_row, textvariable=self.config_min_var, width=5, font=('Arial', 8)).pack(side=tk.LEFT)
         tk.Label(range_row, text=" - ", bg=self.colors['bg_frame'], fg=self.colors['text_main']).pack(side=tk.LEFT)
         tk.Entry(range_row, textvariable=self.config_max_var, width=5, font=('Arial', 8)).pack(side=tk.LEFT)
-        tk.Label(range_row, text="° (hardware output)", bg=self.colors['bg_frame'], 
+        tk.Label(range_row, text="° (hardware output)", bg=self.colors['bg_frame'],
                 fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
         
         # Reversed servos
@@ -588,14 +617,138 @@ class SimpleHandControl:
                 fg=self.colors['text_dim'], font=('Arial', 7)).pack(side=tk.LEFT)
         
         # ==================== PIR STATE MACHINE PANEL ====================
-        pir_main_frame = tk.LabelFrame(main_frame, text="PIR State Machine (Test & Export)", 
+        pir_main_frame = tk.LabelFrame(main_frame, text="Movement Chain System (Test & Export)",
                                        bg=self.colors['bg_frame'], fg=self.colors['text_main'],
                                        font=('Arial', 10, 'bold'))
         pir_main_frame.pack(fill=tk.X, pady=(5, 10), padx=5)
-        
+
+        # Mode selector row
+        mode_selector_row = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
+        mode_selector_row.pack(fill=tk.X, padx=10, pady=5)
+
+        tk.Label(mode_selector_row, text="Mode:", bg=self.colors['bg_frame'],
+                fg=self.colors['text_main'], font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
+
+        tk.Radiobutton(mode_selector_row, text="Continuous Loop",
+                      variable=self.chain_mode, value='continuous',
+                      command=self.on_chain_mode_change,
+                      bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                      font=('Arial', 9), selectcolor=self.colors['bg_dark']).pack(side=tk.LEFT, padx=5)
+
+        tk.Radiobutton(mode_selector_row, text="Sensor-Reactive (PIR)",
+                      variable=self.chain_mode, value='sensor',
+                      command=self.on_chain_mode_change,
+                      bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                      font=('Arial', 9), selectcolor=self.colors['bg_dark']).pack(side=tk.LEFT, padx=5)
+
+        # ═══════════════════ CONTINUOUS LOOP MODE FRAME ═══════════════════
+        self.continuous_frame = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
+        self.continuous_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # Top row: Enable toggle and buttons
+        continuous_top_row = tk.Frame(self.continuous_frame, bg=self.colors['bg_frame'])
+        continuous_top_row.pack(fill=tk.X, pady=5)
+
+        self.continuous_enable_cb = tk.Checkbutton(continuous_top_row, text="Enable Continuous Loop",
+                                           variable=self.pir_enabled,
+                                           bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                                           font=('Arial', 9, 'bold'),
+                                           command=self.on_pir_toggle)
+        self.continuous_enable_cb.pack(side=tk.LEFT)
+
+        # Save to Library button
+        self.continuous_save_btn = ctk.CTkButton(continuous_top_row, text="Save to Library",
+                                      command=self.save_to_pir_library,
+                                      fg_color='#c0c0c0', text_color='black',
+                                      hover_color='#e0e0e0',
+                                      corner_radius=0, border_width=2, border_color='#808080',
+                                      width=120)
+        self.continuous_save_btn.pack(side=tk.RIGHT, padx=5)
+
+        # Export button
+        self.continuous_export_btn = ctk.CTkButton(continuous_top_row, text="Export .ino (Continuous)",
+                                      command=self.export_continuous_loop,
+                                      fg_color='#c0c0c0', text_color='black',
+                                      hover_color='#e0e0e0',
+                                      corner_radius=0, border_width=2, border_color='#808080',
+                                      width=180)
+        self.continuous_export_btn.pack(side=tk.RIGHT, padx=5)
+
+        # Movement library
+        continuous_library_frame = tk.LabelFrame(self.continuous_frame, text="Movement Library",
+                                                bg='#e0e0e0', fg='#000000',
+                                                font=('Arial', 9, 'bold'))
+        continuous_library_frame.pack(fill=tk.X, pady=5)
+
+        self.continuous_listbox = tk.Listbox(continuous_library_frame, width=40, height=4, font=('Arial', 8),
+                            selectmode=tk.SINGLE, bg='white')
+        self.continuous_listbox.pack(padx=5, pady=2, fill=tk.X)
+
+        # Button row for add/remove
+        continuous_btn_frame = tk.Frame(continuous_library_frame, bg='#e0e0e0')
+        continuous_btn_frame.pack(fill=tk.X, padx=5, pady=2)
+
+        tk.Button(continuous_btn_frame, text="+", width=3, font=('Arial', 8),
+                 command=lambda: self.add_pir_recording('continuous', self.continuous_listbox)).pack(side=tk.LEFT, padx=1)
+        tk.Button(continuous_btn_frame, text="-", width=3, font=('Arial', 8),
+                 command=lambda: self.remove_pir_recording('continuous', self.continuous_listbox)).pack(side=tk.LEFT, padx=1)
+
+        # Crossfade settings for continuous mode
+        continuous_crossfade_frame = tk.Frame(self.continuous_frame, bg=self.colors['bg_frame'])
+        continuous_crossfade_frame.pack(fill=tk.X, pady=(5, 3))
+
+        tk.Checkbutton(continuous_crossfade_frame, text="Crossfade recordings",
+                      variable=self.pir_crossfade_enabled,
+                      bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                      font=('Arial', 8, 'bold')).pack(side=tk.LEFT)
+
+        tk.Label(continuous_crossfade_frame, text="  Interval:", bg=self.colors['bg_frame'],
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Spinbox(continuous_crossfade_frame, from_=1, to=30, width=3,
+                  textvariable=self.pir_crossfade_interval_min, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(continuous_crossfade_frame, text="-", bg=self.colors['bg_frame'],
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT)
+        tk.Spinbox(continuous_crossfade_frame, from_=1, to=60, width=3,
+                  textvariable=self.pir_crossfade_interval_max, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(continuous_crossfade_frame, text="sec", bg=self.colors['bg_frame'],
+                fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
+
+        # Markov settings for continuous mode
+        continuous_markov_frame = tk.Frame(self.continuous_frame, bg=self.colors['bg_frame'])
+        continuous_markov_frame.pack(fill=tk.X, pady=(0, 5))
+
+        tk.Checkbutton(continuous_markov_frame, text="Markov segments",
+                      variable=self.pir_markov_enabled,
+                      command=self._on_markov_toggle,
+                      bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                      font=('Arial', 8, 'bold')).pack(side=tk.LEFT)
+
+        tk.Label(continuous_markov_frame, text="  Seg:", bg=self.colors['bg_frame'],
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Spinbox(continuous_markov_frame, from_=0.3, to=3.0, increment=0.1, width=4,
+                  textvariable=self.pir_markov_segment_length, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(continuous_markov_frame, text="s", bg=self.colors['bg_frame'],
+                fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
+
+        tk.Label(continuous_markov_frame, text="  Chaos:", bg=self.colors['bg_frame'],
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Scale(continuous_markov_frame, from_=0, to=100, orient=tk.HORIZONTAL, length=80,
+                variable=self.pir_markov_chaos, showvalue=False,
+                bg=self.colors['bg_frame'], highlightthickness=0).pack(side=tk.LEFT, padx=1)
+
+        tk.Checkbutton(continuous_markov_frame, text="HW Preview", variable=self.pir_markov_hardware_preview,
+                      command=self._on_markov_hw_preview_toggle,
+                      bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                      selectcolor=self.colors['bg_dark'], font=('Arial', 8),
+                      activebackground=self.colors['bg_frame']).pack(side=tk.LEFT, padx=(15, 0))
+
+        # ═══════════════════ SENSOR-REACTIVE MODE FRAME ═══════════════════
+        self.sensor_frame = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
+        self.sensor_frame.pack(fill=tk.X, padx=10, pady=5)
+
         # Top row: Enable toggle, state indicator, simulate button
-        pir_top_row = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
-        pir_top_row.pack(fill=tk.X, padx=10, pady=5)
+        pir_top_row = tk.Frame(self.sensor_frame, bg=self.colors['bg_frame'])
+        pir_top_row.pack(fill=tk.X, pady=5)
         
         self.pir_enable_cb = tk.Checkbutton(pir_top_row, text="Enable PIR Mode", 
                                            variable=self.pir_enabled,
@@ -643,13 +796,21 @@ class SimpleHandControl:
         self.pir_save_btn.pack(side=tk.RIGHT, padx=5)
         
         # Export PIR State Machine to Arduino
-        self.pir_export_btn = ctk.CTkButton(pir_top_row, text="Export to .ino", 
+        self.pir_export_btn = ctk.CTkButton(pir_top_row, text="Export .ino (Compressed PIR)", 
                                       command=self.export_pir_state_machine,
                                       fg_color='#c0c0c0', text_color='black',
                                       hover_color='#e0e0e0',
                                       corner_radius=0, border_width=2, border_color='#808080',
-                                      width=110)
+                          width=200)
         self.pir_export_btn.pack(side=tk.RIGHT, padx=5)
+
+        tk.Label(pir_main_frame,
+             text="Export modes: top toolbar Export .ino = full detail layers. PIR Export = compressed state machine for smaller sketches.",
+             bg=self.colors['bg_frame'],
+             fg=self.colors['text_dim'],
+             font=('Arial', 8),
+             anchor='w',
+             justify='left').pack(fill=tk.X, padx=10, pady=(0, 5))
         
         # State assignment cards - three columns with multi-recording support
         pir_states_frame = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
@@ -1731,7 +1892,8 @@ int baseDelay = (int)(500 / speed);
 
 void setup() {{
   Serial.begin(9600);
-  
+  delay(100);  // Give serial time to initialize
+
   // Attach arm servos (adjust pins as needed)
   wristRotate.attach(13);  // Pin for wrist rotate
   wristTilt.attach(14);    // Pin for wrist tilt
@@ -2275,7 +2437,9 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
     def _do_add_pir_recording(self, state, listbox, recording_name):
         """Actually add the recording to the state's list."""
         # Get the right list
-        if state == 'idle':
+        if state == 'continuous':
+            rec_list = self.continuous_recordings
+        elif state == 'idle':
             rec_list = self.pir_idle_recordings
         elif state == 'active':
             rec_list = self.pir_active_recordings
@@ -2297,12 +2461,14 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         selection = listbox.curselection()
         if not selection:
             return
-        
+
         idx = selection[0]
         recording_name = listbox.get(idx)
-        
+
         # Get the right list
-        if state == 'idle':
+        if state == 'continuous':
+            rec_list = self.continuous_recordings
+        elif state == 'idle':
             rec_list = self.pir_idle_recordings
         elif state == 'active':
             rec_list = self.pir_active_recordings
@@ -2322,42 +2488,97 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         """Legacy compatibility - now a no-op since we use listboxes."""
         pass  # Listboxes are updated directly via add/remove
     
-    def on_pir_toggle(self):
-        """Toggle PIR testing mode."""
-        if self.pir_enabled.get():
-            # Enable PIR mode
-            self.pir_state = 'idle'
-            self.pir_state_start_time = time.time()
-            self.pir_last_motion_time = time.time()  # Start fresh
-            self.pir_simulate_btn.configure(state='normal')
-            self.update_pir_state_display()
+    def on_chain_mode_change(self):
+        """Switch between continuous and sensor-reactive modes."""
+        mode = self.chain_mode.get()
 
-            # Randomize starting recording per state so we don't bias index 0.
-            for state_name in ['idle', 'active', 'sleep']:
-                self._randomize_pir_state_recording(state_name)
-            self.pir_crossfade_target_idx = self.pir_recording_index.get(self.pir_state, 0)
-            
-            # Initialize crossfade system
-            self._schedule_next_crossfade()
-            
-            # Initialize Markov if enabled
-            if self.pir_markov_enabled.get():
-                self._rebuild_markov_segments()
-            
-            # Start PIR playback if we have recordings assigned
-            if not self.is_playing:
-                self.is_playing = True
-                self.playback_start_time = time.time()
-            
-            print(f"🔴 PIR Mode enabled - starting in IDLE state")
+        if mode == 'continuous':
+            # Show continuous frame, hide sensor frame
+            self.continuous_frame.pack(fill=tk.X, padx=10, pady=5)
+            self.sensor_frame.pack_forget()
+        else:  # sensor
+            # Show sensor frame, hide continuous frame
+            self.continuous_frame.pack_forget()
+            self.sensor_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # Disable PIR mode when switching to prevent conflicts
+        if self.pir_enabled.get():
+            self.pir_enabled.set(False)
+            self.on_pir_toggle()
+
+    def on_pir_toggle(self):
+        """Toggle PIR/Continuous testing mode."""
+        if self.pir_enabled.get():
+            mode = self.chain_mode.get()
+
+            if mode == 'continuous':
+                # Enable Continuous Loop mode
+                # Copy continuous recordings to idle state so playback logic works
+                self.pir_idle_recordings = self.continuous_recordings.copy()
+                self.pir_active_recordings = []
+                self.pir_sleep_recordings = []
+
+                self.pir_state = 'idle'  # Always stay in idle for continuous mode
+                self.pir_state_start_time = time.time()
+                self.pir_last_motion_time = time.time()
+
+                # Randomize starting recording
+                self._randomize_pir_state_recording('idle')
+                self.pir_crossfade_target_idx = self.pir_recording_index.get('idle', 0)
+
+                # Initialize crossfade system
+                self._schedule_next_crossfade()
+
+                # Initialize Markov if enabled
+                if self.pir_markov_enabled.get():
+                    self._rebuild_markov_segments()
+
+                # Start playback
+                if not self.is_playing:
+                    self.is_playing = True
+                    self.playback_start_time = time.time()
+
+                print(f"🔴 Continuous Loop enabled - playing {len(self.continuous_recordings)} recordings")
+
+            else:  # sensor mode
+                # Enable PIR Sensor-Reactive mode
+                self.pir_state = 'idle'
+                self.pir_state_start_time = time.time()
+                self.pir_last_motion_time = time.time()  # Start fresh
+                self.pir_simulate_btn.configure(state='normal')
+                self.update_pir_state_display()
+
+                # Randomize starting recording per state so we don't bias index 0.
+                for state_name in ['idle', 'active', 'sleep']:
+                    self._randomize_pir_state_recording(state_name)
+                self.pir_crossfade_target_idx = self.pir_recording_index.get(self.pir_state, 0)
+
+                # Initialize crossfade system
+                self._schedule_next_crossfade()
+
+                # Initialize Markov if enabled
+                if self.pir_markov_enabled.get():
+                    self._rebuild_markov_segments()
+
+                # Start PIR playback if we have recordings assigned
+                if not self.is_playing:
+                    self.is_playing = True
+                    self.playback_start_time = time.time()
+
+                print(f"🔴 PIR Mode enabled - starting in IDLE state")
         else:
-            # Disable PIR mode
+            # Disable PIR/Continuous mode
             self.pir_state = 'idle'
-            self.pir_simulate_btn.configure(state='disabled')
-            self.pir_state_label.config(text="OFF", bg='#888888')
-            self.pir_rec_label.config(text="")
-            self.pir_timer_label.config(text="")
-            print("⚪ PIR Mode disabled")
+            if hasattr(self, 'pir_simulate_btn'):
+                self.pir_simulate_btn.configure(state='disabled')
+            if hasattr(self, 'pir_state_label'):
+                self.pir_state_label.config(text="OFF", bg='#888888')
+                self.pir_rec_label.config(text="")
+                self.pir_timer_label.config(text="")
+
+            mode = self.chain_mode.get()
+            mode_name = "Continuous Loop" if mode == 'continuous' else "PIR Mode"
+            print(f"⚪ {mode_name} disabled")
 
     def _randomize_pir_state_recording(self, state):
         """Pick a random current recording index for the given PIR state."""
@@ -2460,7 +2681,12 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         
         elif self.pir_state == 'idle':
             # Check if we should go to sleep
-            sleep_timeout_sec = self.pir_sleep_timeout.get() * 60  # Convert minutes to seconds
+            try:
+                sleep_timeout_sec = self.pir_sleep_timeout.get() * 60  # Convert minutes to seconds
+            except (ValueError, tk.TclError):
+                sleep_timeout_sec = 1800  # Default to 30 minutes if field is empty/invalid
+            if sleep_timeout_sec <= 0:
+                sleep_timeout_sec = float('inf')  # Disable sleep if set to 0
             if time_since_motion >= sleep_timeout_sec:
                 self.pir_previous_state = 'idle'
                 self.pir_state = 'sleep'
@@ -3218,6 +3444,81 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             return None
         return self.load_pir_recording(target_name)
     
+    def export_continuous_loop(self):
+        """Export continuous loop Arduino sketch without PIR state machine."""
+        # Validate that we have recordings
+        if not self.continuous_recordings:
+            tkinter.messagebox.showwarning("No Recordings",
+                "Please add at least one recording to the Movement Library before exporting.")
+            return
+
+        # Load all recordings
+        recordings = []
+        for rec_name in self.continuous_recordings:
+            if rec_name and rec_name != '(None)':
+                layers = self.load_pir_recording(rec_name)
+                if layers:
+                    recordings.append({'name': rec_name, 'layers': layers})
+                    print(f"📂 Loaded {rec_name} ({len(layers)} layers)")
+                else:
+                    print(f"⚠️ Could not load recording: {rec_name}")
+
+        if not recordings:
+            tkinter.messagebox.showerror("Load Failed", "Could not load any of the assigned recordings.")
+            return
+
+        # Generate the Arduino code - use Markov if enabled
+        if self.pir_markov_enabled.get():
+            # Create a fake recordings dict with only 'idle' state for Markov generation
+            recordings_dict = {'idle': recordings, 'active': [], 'sleep': []}
+            code = self.generate_markov_continuous_code(recordings_dict)
+            mode_str = "Markov"
+        else:
+            code = self.generate_continuous_crossfade_code(recordings)
+            mode_str = "Crossfade"
+
+        # Save to file
+        filename = f"continuous_{mode_str.lower()}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.ino"
+        filepath = os.path.join(os.getcwd(), filename)
+
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(code)
+
+            rec_list_str = ", ".join([r['name'] for r in recordings])
+            tkinter.messagebox.showinfo("Export Successful",
+                f"Exported continuous loop Arduino sketch:\n\n"
+                f"File: {filename}\n"
+                f"Mode: {mode_str}\n"
+                f"Recordings: {len(recordings)}\n"
+                f"  {rec_list_str}\n\n"
+                f"Upload this sketch to your Arduino to run the continuous movement loop.")
+            print(f"✅ Exported: {filename}")
+        except Exception as e:
+            tkinter.messagebox.showerror("Export Failed", f"Failed to write file:\n{e}")
+            print(f"❌ Export failed: {e}")
+
+    def generate_continuous_crossfade_code(self, recordings):
+        """Generate Arduino code for continuous crossfade without PIR."""
+        # Wrap recordings in the expected format and use the existing PIR generator
+        # but strip out the PIR sensor and state machine logic
+        recordings_dict = {'idle': recordings, 'active': [], 'sleep': []}
+        full_code = self.generate_pir_state_machine_code(recordings_dict)
+
+        # Remove PIR-specific code and simplify to just continuous loop
+        # For now, just use the PIR code generator (will work but has extra state machine)
+        # TODO: Could create a cleaner generator without state machine overhead
+        return full_code.replace("PIR Sensor State Machine", "Continuous Loop (Crossfade)")
+
+    def generate_markov_continuous_code(self, recordings_dict):
+        """Generate Arduino code for continuous Markov without PIR states."""
+        full_code = self.generate_markov_pir_code(recordings_dict)
+
+        # Simplify: remove PIR sensor logic, keep only 'idle' state running continuously
+        # For now, just use the Markov PIR code generator
+        # TODO: Could create a cleaner generator without state machine overhead
+        return full_code.replace("PIR Sensor State Machine", "Continuous Loop (Markov)")
+
     def export_pir_state_machine(self):
         """Export the complete PIR State Machine to Arduino .ino file."""
         # Validate that we have recordings assigned
@@ -3284,7 +3585,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             
             tkinter.messagebox.showinfo(f"PIR Export ({mode_str})", 
                 f"Arduino code exported to:\n{filepath}\n\n" +
-                f"Mode: {mode_str}\n\n" +
+                f"Mode: {mode_str} (compressed PIR export)\n\n" +
                 f"State Recordings:\n" + "\n".join(states_info) + "\n\n" +
                 f"Timing:\n" +
                 f"  Active duration: {self.pir_active_duration.get()}s\n" +
@@ -3344,16 +3645,16 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         
         code = f'''// PIR State Machine - Auto-generated by Hand Control Interface
 // Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-// 
+//
 // State Machine:
 //   MOTION DETECTED -> ACTIVE state (plays active recordings)
-//   After {self.pir_active_duration.get()}s no motion -> IDLE state  
+//   After {self.pir_active_duration.get()}s no motion -> IDLE state
 //   After {self.pir_sleep_timeout.get()} min idle -> SLEEP state
 //   Any motion -> back to ACTIVE
 //
 // Recordings per state:
 //   IDLE: {rec_counts.get('idle', 0)} recordings
-//   ACTIVE: {rec_counts.get('active', 0)} recordings  
+//   ACTIVE: {rec_counts.get('active', 0)} recordings
 //   SLEEP: {rec_counts.get('sleep', 0)} recordings
 //
 // Smooth blending between states over {self.pir_transition_time.get()}s
@@ -3361,7 +3662,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
 #include <Servo.h>
 
 // ==================== CONFIGURATION ====================
-#define PIR_PIN 3  // PIR sensor input pin
+#define PIR_PIN {hw.get('pir_pin', 2)}  // PIR sensor input pin
 #define NUM_SERVOS 8
 #define UPDATE_INTERVAL 5  // ms between servo updates (200Hz)
 
@@ -3723,8 +4024,9 @@ void updateServos() {
 
 void setup() {
   Serial.begin(9600);
+  delay(100);  // Give serial time to initialize
   Serial.println("PIR State Machine Starting...");
-  
+
   // Seed random number generator for recording selection
   randomSeed(analogRead(0));
   
@@ -3946,7 +4248,7 @@ void loop() {
 #include <Servo.h>
 
 // ==================== CONFIGURATION ====================
-#define PIR_PIN 3
+#define PIR_PIN {hw.get('pir_pin', 2)}
 #define NUM_SERVOS 8
 #define UPDATE_INTERVAL 20
 #define SAMPLES_PER_SEGMENT {SAMPLES_PER_SEG}
@@ -4300,8 +4602,9 @@ void updateServos() {
 
 void setup() {
   Serial.begin(9600);
+  delay(100);  // Give serial time to initialize
   Serial.println("PIR Markov State Machine Starting...");
-  
+
   randomSeed(analogRead(0));
   pinMode(PIR_PIN, INPUT);
   
@@ -5063,7 +5366,7 @@ void loop() {
         self.servo_limits = [tuple(lim) for lim in self.hardware_config['per_servo_limits']]
         self.servo_reversed = [i in self.hardware_config['reversed_servos'] for i in range(8)]
         self.default_port = self.hardware_config['serial_port']
-        
+
         # Update UI elements if they exist
         if hasattr(self, 'config_name_var'):
             self.config_name_var.set(self.hardware_config['name'])
@@ -5073,14 +5376,16 @@ void loop() {
             self.config_max_var.set(self.hardware_config['global_max_angle'])
         if hasattr(self, 'config_port_var'):
             self.config_port_var.set(self.hardware_config['serial_port'])
+        if hasattr(self, 'config_pir_pin_var'):
+            self.config_pir_pin_var.set(self.hardware_config.get('pir_pin', 2))
         if hasattr(self, 'config_reversed_vars'):
             for i, var in enumerate(self.config_reversed_vars):
                 var.set(i in self.hardware_config['reversed_servos'])
-        
+
         # Update canvas display
         if hasattr(self, 'update_servo_display'):
             self.update_servo_display()
-        
+
         print(f"🔧 Applied hardware config: {self.hardware_config['name']}")
     
     def update_config_from_ui(self):
@@ -5093,11 +5398,13 @@ void loop() {
             self.hardware_config['global_max_angle'] = self.config_max_var.get()
         if hasattr(self, 'config_port_var'):
             self.hardware_config['serial_port'] = self.config_port_var.get()
+        if hasattr(self, 'config_pir_pin_var'):
+            self.hardware_config['pir_pin'] = self.config_pir_pin_var.get()
         if hasattr(self, 'config_reversed_vars'):
             self.hardware_config['reversed_servos'] = [
                 i for i, var in enumerate(self.config_reversed_vars) if var.get()
             ]
-        
+
         # Apply the changes
         self.apply_hardware_config()
     
@@ -5525,8 +5832,9 @@ void loop() {
             with open(filepath, 'w') as f:
                 f.write(code)
             
-            tkinter.messagebox.showinfo("Export Successful", 
+            tkinter.messagebox.showinfo("Full-Detail Export Successful", 
                                       f"Arduino code exported to:\\n{filepath}\\n\\n" +
+                                      "Mode: Full-detail simultaneous layer export (highest fidelity).\\n\\n" +
                                       f"Exported {len(self.recorded_layers)} layers with " +
                                       f"{sum(len(layer['data']) for layer in self.recorded_layers)} total movements.")
             print(f"📤 Arduino code exported to {filepath}")
@@ -5567,13 +5875,51 @@ void loop() {
         # This avoids the awkward hardcoded 90deg boot pose.
         startup_positions = [90] * 8
 
+        # Sort each layer timeline once.
+        sorted_layer_movements = []
+        for layer in self.recorded_layers:
+            sorted_layer_movements.append(sorted(layer['data'], key=lambda x: x['time']))
+
+        # Nano flash guard:
+        # Full-frame export can exceed 30KB quickly. We try full fidelity first,
+        # then fall back to keyframes/decimation when data is too large.
+        # This keeps short recordings high fidelity while making long recordings compile.
+        NANO_SAFE_TOTAL_FRAMES = 900
+        full_total_frames = sum(len(movements) for movements in sorted_layer_movements)
+        use_compressed_export = full_total_frames > NANO_SAFE_TOTAL_FRAMES
+
+        if use_compressed_export:
+            # First compression pass: semantic keyframe extraction.
+            working_layer_frames = [self._extract_keyframes(movements) for movements in sorted_layer_movements]
+            compressed_total = sum(len(frames) for frames in working_layer_frames)
+
+            # Second compression pass if still too large: uniform decimation per layer.
+            if compressed_total > NANO_SAFE_TOTAL_FRAMES and compressed_total > 0:
+                ratio = NANO_SAFE_TOTAL_FRAMES / compressed_total
+                decimated = []
+                for frames in working_layer_frames:
+                    if len(frames) <= 2:
+                        decimated.append(frames)
+                        continue
+
+                    keep = max(2, int(len(frames) * ratio))
+                    if keep >= len(frames):
+                        decimated.append(frames)
+                        continue
+
+                    step = max(1, int(math.ceil((len(frames) - 1) / (keep - 1))))
+                    reduced = frames[::step]
+                    if reduced[-1] != frames[-1]:
+                        reduced.append(frames[-1])
+                    decimated.append(reduced)
+                working_layer_frames = decimated
+        else:
+            # Preserve full timing for shorter recordings.
+            working_layer_frames = [[dict(m) for m in movements] for movements in sorted_layer_movements]
+
         # Extract frames for all layers WITH TIME NORMALIZATION
         all_layer_keyframes = []
-        for layer in self.recorded_layers:
-            movements = sorted(layer['data'], key=lambda x: x['time'])
-            # Preserve full timing/shape for standard .ino export.
-            # Keyframe compression + interpolation can feel slower/smoother than recorded.
-            keyframes = [dict(m) for m in movements]
+        for layer, keyframes in zip(self.recorded_layers, working_layer_frames):
             
             # TIME NORMALIZE: Scale layer duration to match global loop duration
             # This ensures layers recorded at different durations sync properly
@@ -5590,6 +5936,10 @@ void loop() {
                 'duration': layer['duration'],
                 'keyframes': keyframes
             })
+
+        if use_compressed_export:
+            final_total = sum(len(layer_data['keyframes']) for layer_data in all_layer_keyframes)
+            print(f"[EXPORT] Nano-safe compression enabled: {full_total_frames} -> {final_total} frames")
 
         # Resolve startup position from the first keyframe of each owning layer.
         for servo_idx in range(8):
@@ -5744,7 +6094,8 @@ const int startupPositions[8] = {{{startup_positions_str}}};
         code += '''
 void setup() {
   Serial.begin(9600);
-  
+  delay(100);  // Give serial time to initialize
+
   // Attach servos
   for(int i = 0; i < 8; i++) {
     servo[i].attach(servoPins[i]);
@@ -5888,9 +6239,9 @@ void loop() {
         pir_enable = tk.BooleanVar(value=True)
         tk.Checkbutton(pir_frame, variable=pir_enable, bg=self.colors['bg_frame']).grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
         
-        tk.Label(pir_frame, text="PIR Pin:", bg=self.colors['bg_frame'], 
+        tk.Label(pir_frame, text="PIR Pin:", bg=self.colors['bg_frame'],
                 fg=self.colors['text_main']).grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        pir_pin = tk.IntVar(value=3)
+        pir_pin = tk.IntVar(value=self.hardware_config.get('pir_pin', 2))
         tk.Spinbox(pir_frame, from_=2, to=13, textvariable=pir_pin, width=10).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
         
         tk.Label(pir_frame, text="Motion Timeout (seconds):", bg=self.colors['bg_frame'], 
@@ -6221,7 +6572,8 @@ const uint8_t transitionMatrix[NUM_PHRASES][NUM_PHRASES] PROGMEM = {{
         # Setup function
         code += '''void setup() {
   Serial.begin(9600);
-  
+  delay(100);  // Give serial time to initialize
+
   // Attach servos
   for(int i = 0; i < 8; i++) {
     servo[i].attach(servoPins[i]);

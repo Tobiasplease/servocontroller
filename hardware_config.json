@@ -1,10 +1,11 @@
 {
   "name": "Default",
   "description": "Standard 8-servo hand controller",
-  "serial_port": "COM4",
+  "serial_port": "COM9",
   "baud_rate": 9600,
+  "pir_pin": 3,
   "global_min_angle": 0,
-  "global_max_angle": 180,
+  "global_max_angle": 70,
   "pin_mapping": [
     12,
     11,
