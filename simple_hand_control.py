@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simple 8-Servo Hand Control (5 Fingers + 3 Arm)
+Simple 10-Servo Hand Control (channels S0-S9)
 ================================================
 
 Minimal version focused on:
@@ -9,7 +9,7 @@ Minimal version focused on:
 - Arduino export functionality
 - No complex Markov chains or datasets
 
-Author: Simplified 8-Servo System
+Author: Simplified 10-Servo System
 """
 import tkinter as tk
 from tkinter import ttk
@@ -20,6 +20,7 @@ import time
 import math
 import os
 import json
+import shutil
 import datetime
 import random
 from typing import Optional
@@ -44,8 +45,16 @@ class SimpleHandControl:
         
         self.root = ctk.CTk()
         self.root.title("Servo Control Interface")
-        self.root.geometry("1380x940")
-        self.root.minsize(1200, 820)
+        # Size to the screen, don't assume it. The old fixed 1380x940 with a
+        # 1200x820 minimum was larger than the work area on a 1280x720 display,
+        # so the lower panels sat permanently off-screen and could not be
+        # reached by resizing -- only by scrolling, which is easy to miss.
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        win_w = min(1380, screen_w - 40)
+        win_h = min(940, screen_h - 80)
+        self.root.geometry(f"{win_w}x{win_h}+{max(0, (screen_w - win_w) // 2)}+10")
+        self.root.minsize(min(900, win_w), min(600, win_h))
         
         # Windows 98 classic color scheme - clean and readable
         self.colors = {
@@ -66,44 +75,74 @@ class SimpleHandControl:
         # Default CTkButton color - match Win98 look
         self.default_button_color = '#d4d0c8'
         
-        # Servo configuration
-        self.num_fingers = 5
-        self.num_arm_servos = 3
-        self.finger_names = ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky']
-        self.arm_names = ['Shoulder', 'Elbow', 'Wrist']
-        self.all_servo_names = self.finger_names + self.arm_names
-        
+        # Servo configuration.
+        #
+        # Channels are numbered, not named after anatomy -- this rig gets
+        # rewired per project, so "Shoulder"/"Elbow" went stale. Labels are
+        # built from the pin map as "S<index> (D<pin>)": the index is stable
+        # and matches the wire protocol order, the pin follows the mapping.
+        #
+        # The finger/arm split survives ONLY as a storage detail: every
+        # recording on disk carries separate 'finger_positions' and
+        # 'arm_positions' arrays, so collapsing them into one list would
+        # orphan every take. Group B simply grew from 3 to 5.
+        self.num_fingers = 5        # group A -> channels 0-4
+        self.num_arm_servos = 5     # group B -> channels 5-9
+        self.num_servos = self.num_fingers + self.num_arm_servos
+
         # Hardware configuration (can be saved/loaded as presets)
         self.hardware_config = {
             'name': 'Default',
-            'description': 'Standard 8-servo hand controller',
+            'description': 'Standard 10-servo controller',
             'serial_port': 'COM4',
-            'baud_rate': 9600,
-            'pir_pin': 2,  # PIR sensor digital pin
+            # 115200: a HAND10 frame is ~46 bytes, which is 48ms on the wire
+            # at 9600 baud -- past the send interval. At 115200 it is ~4ms.
+            'baud_rate': 115200,
+            # Expressive range: host-side, applied before the frame goes out.
+            # Change it freely -- it takes effect on the next frame, no reflash.
             'global_min_angle': 0,
             'global_max_angle': 45,
-            'pin_mapping': [12, 11, 10, 9, 8, 7, 6, 5],
-            'servo_names': ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky', 'Shoulder', 'Elbow', 'Wrist'],
-            'reversed_servos': [2, 3],  # Servo indices that are reversed (Middle, Ring)
-            'per_servo_limits': [
-                [0, 180], [0, 180], [0, 180], [0, 180],  # Fingers
-                [0, 180], [0, 180], [0, 180], [0, 180]   # Arm
-            ]
+            # Hardware backstop: compiled into the sketch, so changing it means
+            # regenerating and reflashing. Its job is to survive a corrupt frame,
+            # NOT to shape the motion -- keep it at whatever the mechanism can
+            # physically reach and do the shaping above, per channel.
+            'firmware_safe_min': 0,
+            'firmware_safe_max': 180,
+            'pin_mapping': [12, 11, 10, 9, 8, 7, 6, 5, 4, 3],
+            'servo_names': [f'S{i}' for i in range(10)],
+            'reversed_servos': [2, 3],  # Servo indices that are reversed
+            'per_servo_limits': [[0, 180] for _ in range(10)],
+            'pir_pin': 2,  # moved off 3 so that pin can drive servo S9
         }
         self.hardware_config_file = 'hardware_config.json'
         self.load_hardware_config()  # Load saved config if exists
-        
+        self.migrate_hardware_config()  # grow 8-servo presets to 10
+
+        # Labels are derived, never stored -- rebuilt whenever the pin map changes
+        self.refresh_servo_labels()
+
         # Derive legacy variables from config for backward compatibility
         self.servo_limits = [tuple(lim) for lim in self.hardware_config['per_servo_limits']]
-        self.servo_reversed = [i in self.hardware_config['reversed_servos'] for i in range(8)]
+        self.servo_reversed = [i in self.hardware_config['reversed_servos']
+                               for i in range(self.num_servos)]
         self.default_port = self.hardware_config['serial_port']
         
-        # Initialize positions
-        self.finger_positions = [90.0] * self.num_fingers
-        self.arm_positions = [90.0] * self.num_arm_servos
+        # Initialize positions at the configured rest pose -- the same pose the
+        # listener bakes into its startupPositions[]. These used to be a flat
+        # 90.0, so the first frame the host sent yanked every channel to 90 the
+        # instant the UI opened, throwing away the sketch's startup pose. That
+        # was invisible only while the old double-scaling happened to squash 90
+        # down to 17 degrees; with the scaling gone, 90 means 90.
+        rest = self.get_startup_pose()
+        self.finger_positions = [float(v) for v in rest[:self.num_fingers]]
+        self.arm_positions = [float(v) for v in rest[self.num_fingers:]]
         
         # Control parameters
-        self.cursor_sensitivity = tk.DoubleVar(value=2.0)
+        # Cursor sensitivity is split per axis: X sets how tightly the wave
+        # wraps across the fingers, Y how hard the vertical drag pulls. One
+        # shared value meant a twitchy wave forced a twitchy gravity too.
+        self.cursor_sensitivity = tk.DoubleVar(value=2.0)      # X / wave spread
+        self.cursor_sensitivity_y = tk.DoubleVar(value=1.0)    # Y / gravity gain
         self.servo_range = tk.DoubleVar(value=180.0)
         self.wave_gravity = tk.DoubleVar(value=0.5)  # How much Y position affects all fingers
         self.wave_offset = tk.DoubleVar(value=0.0)   # Base offset for all fingers
@@ -111,7 +150,12 @@ class SimpleHandControl:
         self.global_clamp_max = tk.IntVar(value=180)
         
         # Per-finger wave enable (allows excluding fingers from cursor control)
-        self.finger_wave_enabled = [tk.BooleanVar(value=True) for _ in range(self.num_fingers)]
+        # Wave control now reaches every channel, not just the first five --
+        # this rig is not always a hand. S5..S9 start disabled so existing
+        # setups behave exactly as before until you switch them on.
+        self.wave_enabled = [tk.BooleanVar(value=(i < 5)) for i in range(self.num_servos)]
+        # alias: the finger-bar canvas code indexes 0..4 of the same list
+        self.finger_wave_enabled = self.wave_enabled
         
         # Recording system
         self.recorded_layers = []
@@ -129,14 +173,24 @@ class SimpleHandControl:
         self.playback_speed = tk.DoubleVar(value=1.0)  # Playback speed multiplier (0.1x to 3.0x)
         
         # Markov/organic playback settings
-        self.markov_mode = False  # True when organic variations are active
+        self.markov_mode = False  # True while organic is actually driving a pass
+        # Organic is a property of playback, toggled here and honoured by both
+        # ▶ Play and the exporter, so preview and sketch cannot disagree.
+        self.organic_enabled = tk.BooleanVar(value=False)
+        # name typed into the export dialog; blank falls back to a timestamp
+        self.pending_export_name = ''
+        # Per-channel record-enable. Separate from wave_enabled on purpose:
+        # which bars are on the pad and which channels a take OWNS are two
+        # different questions, and conflating them is what let an overdub
+        # silently seize channels it was not performing.
+        self.rec_armed = [tk.BooleanVar(value=True) for _ in range(self.num_servos)]
         self.position_wobble = tk.DoubleVar(value=1.5)  # ± degrees random offset (subtle)
         self.timing_jitter = tk.DoubleVar(value=8.0)  # ± % timing variation (gentle)
         self.pause_chance = tk.DoubleVar(value=2.0)  # % chance to pause at keyframes (rare)
         self.is_paused_at_keyframe = False
         self.pause_until = 0  # timestamp when pause ends
-        self.wobble_offsets = [0.0] * 8  # current wobble offset per servo
-        self.wobble_targets = [0.0] * 8  # target wobble offset (for smooth transitions)
+        self.wobble_offsets = [0.0] * self.num_servos  # current wobble offset per servo
+        self.wobble_targets = [0.0] * self.num_servos  # target wobble offset (for smooth transitions)
         self.last_wobble_update = 0
         self.jitter_speed_multiplier = 1.0  # current speed jitter (smoothly varies)
         self.jitter_speed_target = 1.0  # target speed for smooth transitions
@@ -146,9 +200,6 @@ class SimpleHandControl:
         self.captured_keyframes = []
         self.keyframe_capture_start = None
         
-        # Movement Chain System Mode ('continuous' or 'sensor')
-        self.chain_mode = tk.StringVar(value='continuous')  # continuous=loop forever, sensor=PIR reactive
-
         # PIR State Machine System
         self.pir_enabled = tk.BooleanVar(value=False)  # PIR testing mode enabled
         self.pir_simulated_motion = False  # Simulated motion detection (for testing)
@@ -168,8 +219,11 @@ class SimpleHandControl:
         self.pir_crossfade_duration_min = tk.IntVar(value=8)   # Min crossfade length (seconds)
         self.pir_crossfade_duration_max = tk.IntVar(value=15)   # Max crossfade length (seconds)
         
-        # Recording assignments for continuous loop mode (shared library)
-        self.continuous_recordings = []  # List of recording names for continuous loop
+        # Boot lockout: hold IDLE and ignore the sensor for this long after
+        # power-up. A PIR needs 30-60s to settle its ambient reference and
+        # false-triggers while it does, so a piece that wakes into ACTIVE the
+        # instant it is switched on is usually reacting to nothing.
+        self.pir_startup_lockout = tk.IntVar(value=10)
 
         # Recording assignments for each state (list of filenames from pir_recordings/ folder)
         self.pir_idle_recordings = []  # List of recording names for IDLE state
@@ -232,10 +286,13 @@ class SimpleHandControl:
             try:
                 self.hand_controller = HandExpressionController(
                     port=self.default_port, 
+                    baudrate=self.hardware_config.get('baud_rate', 115200),
                     clean_output=True,
                     min_angle=self.hardware_config['global_min_angle'],
                     max_angle=self.hardware_config['global_max_angle']
                 )
+                # Start from where the hand actually is, not where we assumed
+                self.sync_pose_from_board()
             except Exception as e:
                 print(f"[WARNING] Could not initialize hand controller: {e}")
         
@@ -245,18 +302,17 @@ class SimpleHandControl:
         
         # Populate PIR recording dropdowns from library
         self.update_pir_recording_combos()
-
-        # Initialize chain mode UI visibility (show continuous by default)
-        self.on_chain_mode_change()
-
+        
         # Start control loop
         self.last_send_time = 0
         self.send_interval = 0.05  # 20Hz
         self.control_loop()
         
-        print("✅ Simple 8-servo hand control initialized")
-        print(f"🖱️ Cursor wave control for {self.num_fingers} fingers")
-        print(f"🎛️ Individual control for {self.num_arm_servos} arm servos")
+        print(f"✅ Simple {self.num_servos}-servo hand control initialized "
+              f"(S0-S{self.num_servos - 1}, PIR on D{self.hardware_config.get('pir_pin', 2)})")
+        enabled = sum(1 for v in self.wave_enabled if v.get())
+        print(f"🖱️ Wave control: {enabled}/{self.num_servos} channels enabled")
+        print(f"🎛️ Individual control for all {self.num_servos} channels")
     
     def create_interface(self):
         """Create the user interface."""
@@ -339,13 +395,10 @@ class SimpleHandControl:
                                      corner_radius=0, border_width=2, border_color='#808080')
         self.playback_btn.pack(side=tk.LEFT, padx=2)
         
-        self.markov_btn = ctk.CTkButton(transport_frame, text="~ Organic", 
-                                    command=self.toggle_markov_playback,
-                                    font=('Arial', 11), width=80,
-                                    fg_color='#c0c0c0', text_color='black',
-                                    hover_color='#e0e0e0',
-                                    corner_radius=0, border_width=2, border_color='#808080')
-        self.markov_btn.pack(side=tk.LEFT, padx=2)
+        # The "~ Organic" transport is gone: organic is now a checkbox in the
+        # Organic Variations panel that modifies ▶ Play. Two play buttons meant
+        # you could be in a mode you did not choose, and Play silently cleared it.
+        # toggle_markov_playback() is kept for any handler that still calls it.
         
         add_separator()
         
@@ -376,25 +429,23 @@ class SimpleHandControl:
         export_button_row = tk.Frame(export_frame, bg=self.colors['bg_main'])
         export_button_row.pack(fill=tk.X)
         
-        ctk.CTkButton(export_button_row, text="Export .ino (Full)", 
-                 command=self.export_arduino_code,
-             font=('Arial', 10), width=130,
-                 fg_color='#c0c0c0', text_color='black',
-                 hover_color='#e0e0e0',
-                 corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
-        
-        ctk.CTkButton(export_button_row, text="Multi-Phrase", 
-                 command=self.export_markov_arduino,
-                 font=('Arial', 10), width=90,
+        # One door to every sketch. The old toolbar had "Export .ino (Full)"
+        # and "Multi-Phrase" here, a third in the PIR panel and a fourth in the
+        # scratch section -- with a caption elsewhere explaining the difference,
+        # which is what a UI does when the buttons do not carry their own meaning.
+        ctk.CTkButton(export_button_row, text="⬇ Export .ino...",
+                 command=self.open_export_dialog,
+                 font=('Arial', 11, 'bold'), width=150,
                  fg_color='#c0c0c0', text_color='black',
                  hover_color='#e0e0e0',
                  corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
 
-        tk.Label(export_frame,
-             text="Full detail export",
+        self.export_hint_label = tk.Label(export_frame,
+             text="reflects current UI",
              bg=self.colors['bg_main'],
              fg=self.colors['text_dim'],
-             font=('Arial', 7)).pack(anchor='w', padx=3, pady=(1, 0))
+             font=('Arial', 7))
+        self.export_hint_label.pack(anchor='w', padx=3, pady=(1, 0))
         
         add_separator()
         
@@ -431,7 +482,7 @@ class SimpleHandControl:
                  corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.LEFT, padx=2)
         
         # Status bar
-        status_bar = tk.Frame(main_frame, bg=self.colors['bg_dark'], relief=tk.SUNKEN, bd=1)
+        status_bar = self.status_bar = tk.Frame(main_frame, bg=self.colors['bg_dark'], relief=tk.SUNKEN, bd=1)
         status_bar.pack(fill=tk.X, pady=(0, 10))
         
         self.record_status_label = tk.Label(status_bar, text="⚪ Ready to record (Press SPACE)", 
@@ -440,9 +491,68 @@ class SimpleHandControl:
         self.record_status_label.pack(side=tk.LEFT, padx=5, pady=3, fill=tk.X, expand=True)
         
         # Timeline
-        self.timeline_canvas = tk.Canvas(main_frame, height=25, bg=self.colors['bg_dark'], 
+        # Layers live directly under the workspace (see arrange_main_layout) so
+        # the takes stay in view while you are actually performing into them.
+        self.timeline_container = tk.LabelFrame(main_frame, text="Layers",
+                                                bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                                                font=('Arial', 9, 'bold'))
+        self.timeline_container.pack(fill=tk.X, pady=(0, 5))
+
+        # Transport right here, where the takes are. The toolbar copies are
+        # still there, but during a pass your eyes are on the lanes, not the
+        # top of the window.
+        lane_transport = tk.Frame(self.timeline_container, bg=self.colors['bg_frame'])
+        lane_transport.pack(fill=tk.X, padx=4, pady=(2, 0))
+        self.record_btn2 = ctk.CTkButton(lane_transport, text="● REC",
+                 command=self.toggle_recording,
+                 font=('Arial', 10, 'bold'), width=70,
+                 fg_color='#c0c0c0', text_color='black', hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080')
+        self.record_btn2.pack(side=tk.LEFT, padx=2)
+        self.playback_btn2 = ctk.CTkButton(lane_transport, text="▶ Play",
+                 command=self.toggle_playback,
+                 font=('Arial', 10, 'bold'), width=70,
+                 fg_color='#c0c0c0', text_color='black', hover_color='#e0e0e0',
+                 corner_radius=0, border_width=2, border_color='#808080')
+        self.playback_btn2.pack(side=tk.LEFT, padx=2)
+        self.lane_status_label = tk.Label(lane_transport, text="",
+                 bg=self.colors['bg_frame'], fg=self.colors['text_dim'],
+                 font=('Arial', 8), anchor='w')
+        self.lane_status_label.pack(side=tk.LEFT, padx=10)
+
+        # Record-enable per channel, DAW style. A take owns exactly the armed
+        # channels it can actually drive -- so overdubbing S1 no longer drags
+        # S0 along just because S0's bar happens to be on the pad.
+        arm_row = tk.Frame(self.timeline_container, bg=self.colors['bg_frame'])
+        arm_row.pack(fill=tk.X, padx=4, pady=(0, 2))
+        tk.Label(arm_row, text="REC arm:", bg=self.colors['bg_frame'],
+                 fg=self.colors['text_main'], font=('Arial', 8, 'bold')).pack(side=tk.LEFT)
+        for i in range(self.num_servos):
+            tk.Checkbutton(arm_row, text=f"S{i}", variable=self.rec_armed[i],
+                           command=self.on_rec_arm_changed,
+                           bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                           font=('Arial', 8), selectcolor=self.colors['bg_dark']
+                           ).pack(side=tk.LEFT, padx=1)
+        ctk.CTkButton(arm_row, text="all", width=34, height=20, font=('Arial', 8),
+                      command=lambda: self.set_all_rec_armed(True),
+                      fg_color='#c0c0c0', text_color='black', hover_color='#e0e0e0',
+                      corner_radius=0).pack(side=tk.LEFT, padx=(8, 2))
+        ctk.CTkButton(arm_row, text="none", width=40, height=20, font=('Arial', 8),
+                      command=lambda: self.set_all_rec_armed(False),
+                      fg_color='#c0c0c0', text_color='black', hover_color='#e0e0e0',
+                      corner_radius=0).pack(side=tk.LEFT, padx=2)
+        self.arm_hint_label = tk.Label(arm_row, text="", bg=self.colors['bg_frame'],
+                 fg=self.colors['text_dim'], font=('Arial', 8))
+        self.arm_hint_label.pack(side=tk.LEFT, padx=8)
+
+        # Height is re-set as layers arrive -- one lane per layer, each with
+        # the waveform of its take (see redraw_timeline_waves)
+        self.timeline_canvas = tk.Canvas(self.timeline_container, height=self.LANE_HEIGHT,
+                                        bg=self.colors['bg_dark'],
                                         highlightthickness=1, highlightbackground=self.colors['text_dim'])
-        self.timeline_canvas.pack(fill=tk.X, pady=(0, 5))
+        self.timeline_canvas.pack(fill=tk.X, padx=4, pady=(2, 4))
+        self._timeline_sig = None
+        self._timeline_tick = 0
         
         # Playback speed control
         speed_frame = tk.Frame(main_frame, bg=self.colors['bg_main'])
@@ -468,9 +578,9 @@ class SimpleHandControl:
         self.variation_container = tk.Frame(main_frame, bg=self.colors['bg_main'])
         self.variation_container.pack(fill=tk.X, pady=(0, 5))
         
-        self.variation_expanded = True
+        self.variation_expanded = False
         self.variation_btn = ctk.CTkButton(self.variation_container, 
-                                       text="▼ Organic Variations", 
+                                       text="▶ Organic Variations", 
                                        command=self.toggle_variation_panel,
                                        fg_color="transparent", text_color=self.colors['text_main'],
                                        font=('Arial', 11, 'bold'), anchor='w',
@@ -479,8 +589,22 @@ class SimpleHandControl:
         
         self.variation_content = tk.Frame(self.variation_container, bg=self.colors['bg_frame'],
                                           relief=tk.GROOVE, bd=1)
-        self.variation_content.pack(fill=tk.X, pady=(0, 5))  # Start expanded
-        
+        # starts collapsed -- keep the default view lean; the workspace is the point
+        self.organic_btn = self.variation_btn  # header repaints to show [ON]
+
+        # The toggle: organic applies to ▶ Play, so what you preview is what
+        # gets baked into the export.
+        organic_row = tk.Frame(self.variation_content, bg=self.colors['bg_frame'])
+        organic_row.pack(fill=tk.X, padx=5, pady=(4, 2))
+        tk.Checkbutton(organic_row, text="Apply organic to playback and export",
+                       variable=self.organic_enabled, command=self.on_organic_toggled,
+                       bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                       font=('Arial', 9, 'bold'),
+                       selectcolor=self.colors['bg_dark']).pack(side=tk.LEFT)
+        tk.Label(organic_row, text="(off = exact replay of the recorded take)",
+                 bg=self.colors['bg_frame'], fg=self.colors['text_dim'],
+                 font=('Arial', 7)).pack(side=tk.LEFT, padx=6)
+
         # Wobble control
         wobble_row = tk.Frame(self.variation_content, bg=self.colors['bg_frame'])
         wobble_row.pack(fill=tk.X, padx=5, pady=2)
@@ -518,11 +642,11 @@ class SimpleHandControl:
                 fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
         
         # Control mode selection
-        mode_frame = tk.LabelFrame(main_frame, text="Control Mode", 
+        mode_frame = self.mode_frame = tk.LabelFrame(main_frame, text="Control Mode", 
                                   bg=self.colors['bg_frame'], fg=self.colors['text_main'])
         mode_frame.pack(fill=tk.X, pady=(0, 10))
         
-        tk.Radiobutton(mode_frame, text="🖱️ Cursor Wave Control (5 Fingers)", 
+        tk.Radiobutton(mode_frame, text="🖱️ Cursor Wave Control (enabled channels)", 
                       variable=self.control_mode, value="cursor",
                       bg=self.colors['bg_frame'], fg=self.colors['text_main'],
                       command=self.on_mode_change).pack(anchor=tk.W, padx=10, pady=3)
@@ -570,28 +694,61 @@ class SimpleHandControl:
                 fg=self.colors['text_main'], font=('Arial', 8), width=12, anchor='w').pack(side=tk.LEFT)
         self.config_port_var = tk.StringVar(value=self.hardware_config['serial_port'])
         tk.Entry(port_row, textvariable=self.config_port_var, width=10, font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
-        
-        # PIR pin
-        pir_row = tk.Frame(self.hw_config_content, bg=self.colors['bg_frame'])
-        pir_row.pack(fill=tk.X, padx=5, pady=2)
-        tk.Label(pir_row, text="PIR Pin:", bg=self.colors['bg_frame'],
-                fg=self.colors['text_main'], font=('Arial', 8), width=12, anchor='w').pack(side=tk.LEFT)
+
+        tk.Label(port_row, text="Baud:", bg=self.colors['bg_frame'],
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(12, 0))
+        self.config_baud_var = tk.IntVar(value=self.hardware_config.get('baud_rate', 115200))
+        ttk.Combobox(port_row, textvariable=self.config_baud_var, width=8, font=('Arial', 8),
+                     values=[9600, 19200, 38400, 57600, 115200, 250000],
+                     state='normal').pack(side=tk.LEFT, padx=5)
+
+        tk.Label(port_row, text="PIR pin D:", bg=self.colors['bg_frame'],
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(12, 0))
         self.config_pir_pin_var = tk.IntVar(value=self.hardware_config.get('pir_pin', 2))
-        tk.Entry(pir_row, textvariable=self.config_pir_pin_var, width=5, font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
-        tk.Label(pir_row, text="(digital pin for PIR sensor)", bg=self.colors['bg_frame'],
-                fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
+        tk.Spinbox(port_row, from_=0, to=19, textvariable=self.config_pir_pin_var,
+                   width=4, font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
+
+        # Pin mapping -- editable, because the whole point of numbered channels
+        # is that this rig gets rewired between projects
+        pins_row = tk.Frame(self.hw_config_content, bg=self.colors['bg_frame'])
+        pins_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(pins_row, text="Pins S0..S%d:" % (self.num_servos - 1), bg=self.colors['bg_frame'],
+                fg=self.colors['text_main'], font=('Arial', 8), width=12, anchor='w').pack(side=tk.LEFT)
+        self.config_pins_var = tk.StringVar(
+            value=', '.join(str(p) for p in self.hardware_config['pin_mapping']))
+        tk.Entry(pins_row, textvariable=self.config_pins_var, width=40,
+                 font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
+        tk.Label(pins_row, text="(comma separated, in channel order)", bg=self.colors['bg_frame'],
+                fg=self.colors['text_dim'], font=('Arial', 7)).pack(side=tk.LEFT)
 
         # Global angle range
         range_row = tk.Frame(self.hw_config_content, bg=self.colors['bg_frame'])
         range_row.pack(fill=tk.X, padx=5, pady=2)
-        tk.Label(range_row, text="Angle Range:", bg=self.colors['bg_frame'],
+        tk.Label(range_row, text="Angle Range:", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_main'], font=('Arial', 8), width=12, anchor='w').pack(side=tk.LEFT)
         self.config_min_var = tk.IntVar(value=self.hardware_config['global_min_angle'])
         self.config_max_var = tk.IntVar(value=self.hardware_config['global_max_angle'])
         tk.Entry(range_row, textvariable=self.config_min_var, width=5, font=('Arial', 8)).pack(side=tk.LEFT)
         tk.Label(range_row, text=" - ", bg=self.colors['bg_frame'], fg=self.colors['text_main']).pack(side=tk.LEFT)
         tk.Entry(range_row, textvariable=self.config_max_var, width=5, font=('Arial', 8)).pack(side=tk.LEFT)
-        tk.Label(range_row, text="° (hardware output)", bg=self.colors['bg_frame'],
+        tk.Label(range_row, text="° (live clamp — no reflash; per-channel limits below)",
+                bg=self.colors['bg_frame'],
+                fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
+
+        # Hardware backstop. Separate from the range above on purpose: this one
+        # is compiled into the sketch, so it is the only range that costs a
+        # reflash to change. Leave it at what the mechanism can physically reach.
+        safe_row = tk.Frame(self.hw_config_content, bg=self.colors['bg_frame'])
+        safe_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(safe_row, text="Safe Limit:", bg=self.colors['bg_frame'],
+                fg=self.colors['text_main'], font=('Arial', 8), width=12, anchor='w').pack(side=tk.LEFT)
+        self.config_safe_min_var = tk.IntVar(value=self.hardware_config.get('firmware_safe_min', 0))
+        self.config_safe_max_var = tk.IntVar(value=self.hardware_config.get('firmware_safe_max', 180))
+        tk.Entry(safe_row, textvariable=self.config_safe_min_var, width=5, font=('Arial', 8)).pack(side=tk.LEFT)
+        tk.Label(safe_row, text=" - ", bg=self.colors['bg_frame'], fg=self.colors['text_main']).pack(side=tk.LEFT)
+        tk.Entry(safe_row, textvariable=self.config_safe_max_var, width=5, font=('Arial', 8)).pack(side=tk.LEFT)
+        tk.Label(safe_row, text="° (baked into the sketch — needs a reflash)",
+                bg=self.colors['bg_frame'],
                 fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
         
         # Reversed servos
@@ -613,142 +770,39 @@ class SimpleHandControl:
         btn_row.pack(fill=tk.X, padx=5, pady=5)
         ctk.CTkButton(btn_row, text="✅ Apply & Save", command=self.apply_and_save_config,
                  font=('Arial', 11, 'bold'), width=120).pack(side=tk.LEFT, padx=5)
-        tk.Label(btn_row, text="(Reloads hardware with new settings)", bg=self.colors['bg_frame'], 
+        ctk.CTkButton(btn_row, text="⚙ Generate Listener .ino", command=self.export_listener_sketch,
+                 font=('Arial', 11), width=170).pack(side=tk.LEFT, padx=5)
+        tk.Label(btn_row, text="(listener matches the config above -- reflash after changing pins/baud)",
+                bg=self.colors['bg_frame'],
                 fg=self.colors['text_dim'], font=('Arial', 7)).pack(side=tk.LEFT)
         
         # ==================== PIR STATE MACHINE PANEL ====================
-        pir_main_frame = tk.LabelFrame(main_frame, text="Movement Chain System (Test & Export)",
+        # Collapsible, same pattern as Hardware Config -- PIR is only relevant
+        # to some of the rigs this drives, and expanded it pushed the actual
+        # workspace off the bottom of the window.
+        self.pir_container = tk.Frame(main_frame, bg=self.colors['bg_main'])
+        self.pir_container.pack(fill=tk.X, pady=(0, 5))
+
+        self.pir_expanded = False
+        self.pir_panel_btn = ctk.CTkButton(self.pir_container,
+                                       text="▶ PIR State Machine",
+                                       command=self.toggle_pir_panel,
+                                       fg_color="transparent", text_color=self.colors['text_main'],
+                                       font=('Arial', 11, 'bold'), anchor='w',
+                                       hover_color='#E0E0E0')
+        self.pir_panel_btn.pack(fill=tk.X, pady=(0, 2))
+
+        self.pir_content = tk.Frame(self.pir_container, bg=self.colors['bg_main'])
+        # not packed -- starts collapsed
+
+        pir_main_frame = tk.LabelFrame(self.pir_content, text="PIR State Machine (Test & Export)",
                                        bg=self.colors['bg_frame'], fg=self.colors['text_main'],
                                        font=('Arial', 10, 'bold'))
         pir_main_frame.pack(fill=tk.X, pady=(5, 10), padx=5)
-
-        # Mode selector row
-        mode_selector_row = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
-        mode_selector_row.pack(fill=tk.X, padx=10, pady=5)
-
-        tk.Label(mode_selector_row, text="Mode:", bg=self.colors['bg_frame'],
-                fg=self.colors['text_main'], font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
-
-        tk.Radiobutton(mode_selector_row, text="Continuous Loop",
-                      variable=self.chain_mode, value='continuous',
-                      command=self.on_chain_mode_change,
-                      bg=self.colors['bg_frame'], fg=self.colors['text_main'],
-                      font=('Arial', 9), selectcolor=self.colors['bg_dark']).pack(side=tk.LEFT, padx=5)
-
-        tk.Radiobutton(mode_selector_row, text="Sensor-Reactive (PIR)",
-                      variable=self.chain_mode, value='sensor',
-                      command=self.on_chain_mode_change,
-                      bg=self.colors['bg_frame'], fg=self.colors['text_main'],
-                      font=('Arial', 9), selectcolor=self.colors['bg_dark']).pack(side=tk.LEFT, padx=5)
-
-        # ═══════════════════ CONTINUOUS LOOP MODE FRAME ═══════════════════
-        self.continuous_frame = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
-        self.continuous_frame.pack(fill=tk.X, padx=10, pady=5)
-
-        # Top row: Enable toggle and buttons
-        continuous_top_row = tk.Frame(self.continuous_frame, bg=self.colors['bg_frame'])
-        continuous_top_row.pack(fill=tk.X, pady=5)
-
-        self.continuous_enable_cb = tk.Checkbutton(continuous_top_row, text="Enable Continuous Loop",
-                                           variable=self.pir_enabled,
-                                           bg=self.colors['bg_frame'], fg=self.colors['text_main'],
-                                           font=('Arial', 9, 'bold'),
-                                           command=self.on_pir_toggle)
-        self.continuous_enable_cb.pack(side=tk.LEFT)
-
-        # Save to Library button
-        self.continuous_save_btn = ctk.CTkButton(continuous_top_row, text="Save to Library",
-                                      command=self.save_to_pir_library,
-                                      fg_color='#c0c0c0', text_color='black',
-                                      hover_color='#e0e0e0',
-                                      corner_radius=0, border_width=2, border_color='#808080',
-                                      width=120)
-        self.continuous_save_btn.pack(side=tk.RIGHT, padx=5)
-
-        # Export button
-        self.continuous_export_btn = ctk.CTkButton(continuous_top_row, text="Export .ino (Continuous)",
-                                      command=self.export_continuous_loop,
-                                      fg_color='#c0c0c0', text_color='black',
-                                      hover_color='#e0e0e0',
-                                      corner_radius=0, border_width=2, border_color='#808080',
-                                      width=180)
-        self.continuous_export_btn.pack(side=tk.RIGHT, padx=5)
-
-        # Movement library
-        continuous_library_frame = tk.LabelFrame(self.continuous_frame, text="Movement Library",
-                                                bg='#e0e0e0', fg='#000000',
-                                                font=('Arial', 9, 'bold'))
-        continuous_library_frame.pack(fill=tk.X, pady=5)
-
-        self.continuous_listbox = tk.Listbox(continuous_library_frame, width=40, height=4, font=('Arial', 8),
-                            selectmode=tk.SINGLE, bg='white')
-        self.continuous_listbox.pack(padx=5, pady=2, fill=tk.X)
-
-        # Button row for add/remove
-        continuous_btn_frame = tk.Frame(continuous_library_frame, bg='#e0e0e0')
-        continuous_btn_frame.pack(fill=tk.X, padx=5, pady=2)
-
-        tk.Button(continuous_btn_frame, text="+", width=3, font=('Arial', 8),
-                 command=lambda: self.add_pir_recording('continuous', self.continuous_listbox)).pack(side=tk.LEFT, padx=1)
-        tk.Button(continuous_btn_frame, text="-", width=3, font=('Arial', 8),
-                 command=lambda: self.remove_pir_recording('continuous', self.continuous_listbox)).pack(side=tk.LEFT, padx=1)
-
-        # Crossfade settings for continuous mode
-        continuous_crossfade_frame = tk.Frame(self.continuous_frame, bg=self.colors['bg_frame'])
-        continuous_crossfade_frame.pack(fill=tk.X, pady=(5, 3))
-
-        tk.Checkbutton(continuous_crossfade_frame, text="Crossfade recordings",
-                      variable=self.pir_crossfade_enabled,
-                      bg=self.colors['bg_frame'], fg=self.colors['text_main'],
-                      font=('Arial', 8, 'bold')).pack(side=tk.LEFT)
-
-        tk.Label(continuous_crossfade_frame, text="  Interval:", bg=self.colors['bg_frame'],
-                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(10, 0))
-        tk.Spinbox(continuous_crossfade_frame, from_=1, to=30, width=3,
-                  textvariable=self.pir_crossfade_interval_min, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
-        tk.Label(continuous_crossfade_frame, text="-", bg=self.colors['bg_frame'],
-                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT)
-        tk.Spinbox(continuous_crossfade_frame, from_=1, to=60, width=3,
-                  textvariable=self.pir_crossfade_interval_max, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
-        tk.Label(continuous_crossfade_frame, text="sec", bg=self.colors['bg_frame'],
-                fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
-
-        # Markov settings for continuous mode
-        continuous_markov_frame = tk.Frame(self.continuous_frame, bg=self.colors['bg_frame'])
-        continuous_markov_frame.pack(fill=tk.X, pady=(0, 5))
-
-        tk.Checkbutton(continuous_markov_frame, text="Markov segments",
-                      variable=self.pir_markov_enabled,
-                      command=self._on_markov_toggle,
-                      bg=self.colors['bg_frame'], fg=self.colors['text_main'],
-                      font=('Arial', 8, 'bold')).pack(side=tk.LEFT)
-
-        tk.Label(continuous_markov_frame, text="  Seg:", bg=self.colors['bg_frame'],
-                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(10, 0))
-        tk.Spinbox(continuous_markov_frame, from_=0.3, to=3.0, increment=0.1, width=4,
-                  textvariable=self.pir_markov_segment_length, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
-        tk.Label(continuous_markov_frame, text="s", bg=self.colors['bg_frame'],
-                fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
-
-        tk.Label(continuous_markov_frame, text="  Chaos:", bg=self.colors['bg_frame'],
-                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(10, 0))
-        tk.Scale(continuous_markov_frame, from_=0, to=100, orient=tk.HORIZONTAL, length=80,
-                variable=self.pir_markov_chaos, showvalue=False,
-                bg=self.colors['bg_frame'], highlightthickness=0).pack(side=tk.LEFT, padx=1)
-
-        tk.Checkbutton(continuous_markov_frame, text="HW Preview", variable=self.pir_markov_hardware_preview,
-                      command=self._on_markov_hw_preview_toggle,
-                      bg=self.colors['bg_frame'], fg=self.colors['text_main'],
-                      selectcolor=self.colors['bg_dark'], font=('Arial', 8),
-                      activebackground=self.colors['bg_frame']).pack(side=tk.LEFT, padx=(15, 0))
-
-        # ═══════════════════ SENSOR-REACTIVE MODE FRAME ═══════════════════
-        self.sensor_frame = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
-        self.sensor_frame.pack(fill=tk.X, padx=10, pady=5)
-
+        
         # Top row: Enable toggle, state indicator, simulate button
-        pir_top_row = tk.Frame(self.sensor_frame, bg=self.colors['bg_frame'])
-        pir_top_row.pack(fill=tk.X, pady=5)
+        pir_top_row = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
+        pir_top_row.pack(fill=tk.X, padx=10, pady=5)
         
         self.pir_enable_cb = tk.Checkbutton(pir_top_row, text="Enable PIR Mode", 
                                            variable=self.pir_enabled,
@@ -794,18 +848,22 @@ class SimpleHandControl:
                                       corner_radius=0, border_width=2, border_color='#808080',
                                       width=120)
         self.pir_save_btn.pack(side=tk.RIGHT, padx=5)
-        
-        # Export PIR State Machine to Arduino
-        self.pir_export_btn = ctk.CTkButton(pir_top_row, text="Export .ino (Compressed PIR)", 
-                                      command=self.export_pir_state_machine,
+
+        # Clear Library: empties the folder AND the three state lists, so a
+        # fresh start does not leave the cards pointing at names that are gone.
+        self.pir_clear_btn = ctk.CTkButton(pir_top_row, text="Clear Library",
+                                      command=self.clear_recording_library,
                                       fg_color='#c0c0c0', text_color='black',
-                                      hover_color='#e0e0e0',
+                                      hover_color='#e0a0a0',
                                       corner_radius=0, border_width=2, border_color='#808080',
-                          width=200)
-        self.pir_export_btn.pack(side=tk.RIGHT, padx=5)
+                                      width=110)
+        self.pir_clear_btn.pack(side=tk.RIGHT, padx=5)
+
+        # PIR export moved into the single Export .ino dialog, which preselects
+        # the PIR generator whenever PIR mode is on.
 
         tk.Label(pir_main_frame,
-             text="Export modes: top toolbar Export .ino = full detail layers. PIR Export = compressed state machine for smaller sketches.",
+             text="With PIR enabled, Export .ino defaults to the compressed state machine.",
              bg=self.colors['bg_frame'],
              fg=self.colors['text_dim'],
              font=('Arial', 8),
@@ -867,7 +925,14 @@ class SimpleHandControl:
         tk.Label(pir_timing_frame, text="sec", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
         
-        tk.Label(pir_timing_frame, text="    Sleep after:", bg=self.colors['bg_frame'], 
+        tk.Label(pir_timing_frame, text="    Startup idle:", bg=self.colors['bg_frame'],
+                fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(15, 0))
+        tk.Spinbox(pir_timing_frame, from_=0, to=300, width=4,
+                  textvariable=self.pir_startup_lockout, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
+        tk.Label(pir_timing_frame, text="sec", bg=self.colors['bg_frame'],
+                fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
+
+        tk.Label(pir_timing_frame, text="    Sleep after:", bg=self.colors['bg_frame'],
                 fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(15, 0))
         tk.Spinbox(pir_timing_frame, from_=1, to=60, width=4, 
                   textvariable=self.pir_sleep_timeout, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
@@ -963,7 +1028,7 @@ class SimpleHandControl:
         # ==================== END PIR PANEL ====================
         
         # Create two main areas side by side
-        content_frame = tk.Frame(main_frame, bg=self.colors['bg_main'])
+        content_frame = self.content_frame = tk.Frame(main_frame, bg=self.colors['bg_main'])
         content_frame.pack(fill=tk.BOTH, expand=True)
         
         # Left side - Cursor control
@@ -972,9 +1037,12 @@ class SimpleHandControl:
         self.cursor_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
         
         # Canvas for cursor control with visual feedback - larger area for finer control
-        self.canvas = tk.Canvas(self.cursor_frame, width=550, height=380,
+        # 380 tall pushed the Layers panel off the bottom on a 720p-logical
+        # screen. It still fills whatever height is going (expand=True), this
+        # is only the floor -- the pad stays usable, the lanes stay visible.
+        self.canvas = tk.Canvas(self.cursor_frame, width=550, height=260,
                                bg=self.colors['canvas_bg'])
-        self.canvas.pack(pady=10, fill=tk.BOTH, expand=True)
+        self.canvas.pack(pady=6, fill=tk.BOTH, expand=True)
         self.canvas.bind("<Motion>", self.on_mouse_move)
         self.canvas.bind("<Configure>", lambda e: self.on_canvas_resize(e))
         
@@ -983,12 +1051,13 @@ class SimpleHandControl:
         finger_enable_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
         tk.Label(finger_enable_frame, text="Wave On:", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(0, 5))
-        for i, name in enumerate(self.finger_names):
-            cb = tk.Checkbutton(finger_enable_frame, text=name[:3], 
-                               variable=self.finger_wave_enabled[i],
+        for i, name in enumerate(self.all_servo_names):
+            cb = tk.Checkbutton(finger_enable_frame, text=f"S{i}",
+                               variable=self.wave_enabled[i],
+                               command=self.on_wave_channel_toggled,
                                bg=self.colors['bg_frame'], fg=self.colors['text_main'],
                                font=('Arial', 8), selectcolor=self.colors['bg_dark'])
-            cb.pack(side=tk.LEFT, padx=3)
+            cb.pack(side=tk.LEFT, padx=2)
         
         # Bind spacebar for recording toggle
         self.root.bind("<space>", lambda e: self.toggle_recording())
@@ -999,15 +1068,37 @@ class SimpleHandControl:
         self.create_visual_feedback()
         
         # Cursor control parameters - Row 1
-        param_frame1 = tk.Frame(self.cursor_frame, bg=self.colors['bg_frame'])
-        param_frame1.pack(fill=tk.X, padx=10, pady=(5, 2))
+        # Wave tuning collapses like Hardware Config -- these get set once per
+        # rig and then just take up room above the lanes. The Wave On row stays
+        # visible, since that is what puts bars on the pad.
+        self.wave_cfg_container = tk.Frame(self.cursor_frame, bg=self.colors['bg_frame'])
+        self.wave_cfg_container.pack(fill=tk.X, padx=6, pady=(2, 4))
+        self.wave_cfg_expanded = False
+        self.wave_cfg_btn = ctk.CTkButton(self.wave_cfg_container,
+                                      text="▶ Wave Config",
+                                      command=self.toggle_wave_config_panel,
+                                      fg_color="transparent", text_color=self.colors['text_main'],
+                                      font=('Arial', 10, 'bold'), anchor='w',
+                                      hover_color='#E0E0E0', height=22)
+        self.wave_cfg_btn.pack(fill=tk.X)
+        self.wave_cfg_content = tk.Frame(self.wave_cfg_container, bg=self.colors['bg_frame'])
+        # not packed -- starts collapsed
+
+        param_frame1 = tk.Frame(self.wave_cfg_content, bg=self.colors['bg_frame'])
+        param_frame1.pack(fill=tk.X, padx=4, pady=(4, 2))
         
-        tk.Label(param_frame1, text="Wave:", bg=self.colors['bg_frame'], 
+        tk.Label(param_frame1, text="Sens X:", bg=self.colors['bg_frame'],
                 font=('Arial', 8)).pack(side=tk.LEFT)
         tk.Scale(param_frame1, from_=0.1, to=10.0, resolution=0.1, orient=tk.HORIZONTAL,
-                variable=self.cursor_sensitivity, length=100, 
+                variable=self.cursor_sensitivity, length=90,
                 font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
-        
+
+        tk.Label(param_frame1, text="Sens Y:", bg=self.colors['bg_frame'],
+                font=('Arial', 8)).pack(side=tk.LEFT, padx=(5, 0))
+        tk.Scale(param_frame1, from_=0.1, to=4.0, resolution=0.1, orient=tk.HORIZONTAL,
+                variable=self.cursor_sensitivity_y, length=90,
+                font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
+
         tk.Label(param_frame1, text="Clamp Min:", bg=self.colors['bg_frame'],
             font=('Arial', 8)).pack(side=tk.LEFT, padx=(10,0))
         tk.Scale(param_frame1, from_=0, to=180, resolution=1, orient=tk.HORIZONTAL,
@@ -1024,8 +1115,8 @@ class SimpleHandControl:
              font=('Arial', 10), width=130).pack(side=tk.LEFT, padx=(5, 0))
         
         # Cursor control parameters - Row 2
-        param_frame2 = tk.Frame(self.cursor_frame, bg=self.colors['bg_frame'])
-        param_frame2.pack(fill=tk.X, padx=10, pady=(2, 5))
+        param_frame2 = tk.Frame(self.wave_cfg_content, bg=self.colors['bg_frame'])
+        param_frame2.pack(fill=tk.X, padx=4, pady=(2, 4))
         
         tk.Label(param_frame2, text="Gravity:", bg=self.colors['bg_frame'], 
                 font=('Arial', 8)).pack(side=tk.LEFT)
@@ -1047,7 +1138,7 @@ class SimpleHandControl:
         self.create_servo_sliders()
         
         # Layer list at bottom
-        layer_frame = tk.LabelFrame(main_frame, text="Recorded Layers", 
+        layer_frame = self.layer_frame = tk.LabelFrame(main_frame, text="Recorded Layers", 
                                     bg=self.colors['bg_frame'], fg=self.colors['text_main'])
         layer_frame.pack(fill=tk.X, pady=(10, 0))
         
@@ -1059,7 +1150,7 @@ class SimpleHandControl:
         
         self.layer_listbox = tk.Listbox(list_container, bg=self.colors['bg_dark'], 
                                         fg=self.colors['text_main'],
-                                        selectmode=tk.SINGLE, height=6,
+                                        selectmode=tk.SINGLE, height=3,
                                         yscrollcommand=scrollbar.set, font=('Arial', 8))
         self.layer_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.layer_listbox.bind('<Double-Button-1>', lambda e: self.delete_selected_layer())
@@ -1089,13 +1180,37 @@ class SimpleHandControl:
                  hover_color='#e0e0e0',
                  corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.RIGHT, padx=2)
         
-        ctk.CTkButton(layer_bottom, text="Delete Selected", 
+        ctk.CTkButton(layer_bottom, text="Delete Selected",
                  command=self.delete_selected_layer,
                  font=('Arial', 10), width=110,
                  fg_color='#c0c0c0', text_color='black',
                  hover_color='#e0e0e0',
                  corner_radius=0, border_width=2, border_color='#808080').pack(side=tk.RIGHT)
-    
+
+        self.arrange_main_layout()
+
+    def arrange_main_layout(self):
+        """Put the workspace first and the layers directly beneath it.
+
+        Widgets are created in whatever order the panels were written, which
+        left the workspace at the very bottom -- below a full-height PIR block
+        -- while the timeline sat up by the toolbar. Rather than move hundreds
+        of lines, repack the four frames that matter; pack(after=...) rewrites
+        the order without touching how any panel is built.
+
+        Resulting order:
+            toolbar / status / control mode
+            WORKSPACE  (cursor pad + per-channel sliders)
+            LAYERS     (waveform lanes + playhead)
+            recorded-layer list
+            playback speed, organic variations
+            hardware config, PIR          (both collapsed by default)
+        """
+        self.mode_frame.pack(fill=tk.X, pady=(0, 6), after=self.status_bar)
+        self.content_frame.pack(fill=tk.BOTH, expand=True, after=self.mode_frame)
+        self.timeline_container.pack(fill=tk.X, pady=(6, 0), after=self.content_frame)
+        self.layer_frame.pack(fill=tk.X, pady=(4, 0), after=self.timeline_container)
+
     def create_servo_sliders(self):
         """Create single-servo control interface."""
         # Servo selector
@@ -1323,7 +1438,7 @@ class SimpleHandControl:
             self.global_clamp_min.set(min_lim)
             self.global_clamp_max.set(max_lim)
 
-        for i in range(8):
+        for i in range(self.num_servos):
             self.servo_limits[i] = (min_lim, max_lim)
             if hasattr(self, 'servo_min_vars') and i < len(self.servo_min_vars):
                 self.servo_min_vars[i].set(min_lim)
@@ -1333,6 +1448,58 @@ class SimpleHandControl:
         self.update_large_bar()
         self.update_small_servo_bars()
         self.update_visual_feedback()
+
+    def effective_servo_limits(self):
+        """The clamp a STANDALONE sketch has to enforce for itself.
+
+        The listener can bake a wide backstop because the host clamps every
+        frame on the way out. An exported movement/Markov/PIR sketch has no
+        host: it is the whole system, so whatever the UI was applying has to
+        be compiled into it or the piece plays back with a different range
+        than it was performed with.
+
+        That is the per-channel limit intersected with the expressive range.
+        Where they do not overlap the expressive range wins, since it is the
+        outer authority, and the channel is pinned rather than left free."""
+        lo_global = int(self.hardware_config.get('global_min_angle', 0))
+        hi_global = int(self.hardware_config.get('global_max_angle', 180))
+        return [self.effective_limits_for(i) for i in range(self.num_servos)]
+
+    def effective_limits_for(self, servo_idx):
+        """Effective range for one channel. Same rule as the exported arrays,
+        so the live path and any generated sketch clamp and mirror identically."""
+        lo_global = int(self.hardware_config.get('global_min_angle', 0))
+        hi_global = int(self.hardware_config.get('global_max_angle', 180))
+        try:
+            lo, hi = self.servo_limits[servo_idx]
+        except (IndexError, TypeError, ValueError):
+            lo, hi = 0, 180
+        lo = max(int(lo), lo_global)
+        hi = min(int(hi), hi_global)
+        if lo > hi:
+            lo = hi
+        return lo, hi
+
+    def effective_limits_c_arrays(self):
+        """The same limits rendered as two C initialiser lists."""
+        limits = self.effective_servo_limits()
+        return (', '.join(str(lo) for lo, _ in limits),
+                ', '.join(str(hi) for _, hi in limits))
+
+    def push_servo_state_to_config(self):
+        """Write the live per-channel limits and reversal back into the config.
+
+        servo_limits/servo_reversed are derived FROM hardware_config at load,
+        but the visualizer's row controls and the preset loader only ever wrote
+        the derived copies. Everything that generates a sketch reads the
+        config, so edits made on the bars drove correctly live and then came
+        out wrong in every export -- and were reverted whenever the config was
+        re-applied, since that re-derives from the config. One direction of
+        truth was missing; this is it."""
+        self.hardware_config['per_servo_limits'] = [
+            [int(lo), int(hi)] for lo, hi in self.servo_limits[:self.num_servos]]
+        self.hardware_config['reversed_servos'] = sorted(
+            i for i in range(self.num_servos) if self.servo_reversed[i])
 
     def on_bar_limits_changed(self, servo_idx):
         """Apply min/max clamp edits from visualizer row controls."""
@@ -1347,6 +1514,7 @@ class SimpleHandControl:
         self.servo_min_vars[servo_idx].set(min_lim)
         self.servo_max_vars[servo_idx].set(max_lim)
         self.servo_limits[servo_idx] = (min_lim, max_lim)
+        self.push_servo_state_to_config()
 
         self.apply_servo_limits_to_state()
         self.update_large_bar()
@@ -1354,15 +1522,103 @@ class SimpleHandControl:
         self.update_visual_feedback()
 
     def on_bar_reverse_changed(self, servo_idx):
-        """Apply reverse toggle from visualizer row controls."""
+        """Apply reverse toggle from visualizer row controls.
+
+        Writes through to hardware_config, which is the copy every exporter
+        reads. This used to set only self.servo_reversed, so a channel flipped
+        on its bar drove correctly live and then came out unreversed in every
+        generated sketch -- and was silently reverted the next time the config
+        was applied, since that re-derives servo_reversed from the config."""
         self.servo_reversed[servo_idx] = bool(self.servo_rev_vars[servo_idx].get())
+
+        self.push_servo_state_to_config()
+        # Keep the Hardware Config checkboxes showing the same truth
+        if hasattr(self, 'config_reversed_vars'):
+            flagged = self.hardware_config['reversed_servos']
+            for i, var in enumerate(self.config_reversed_vars):
+                if i < self.num_servos:
+                    var.set(i in flagged)
+
         self.update_large_bar()
         self.update_small_servo_bars()
         self.update_visual_feedback()
 
+    def sync_pose_from_board(self):
+        """Adopt the pose the board reported at boot, if it reported one.
+
+        The board is the authority on where the hand physically is -- the
+        config only records what was baked the last time a listener was
+        generated here, which says nothing about a sketch flashed from another
+        machine or edited by hand. Adopting on connect means the host's first
+        frame asks for the pose the hand is already holding, so connecting
+        moves nothing.
+
+        Reported values are hardware degrees (post-reversal, as the wire
+        carries them). get_hardware_position mirrors within the channel's
+        limits, and a mirror is its own inverse, so passing them back through
+        it recovers the logical angle the sliders should show."""
+        if not self.hand_controller:
+            return False
+        reported = getattr(self.hand_controller, 'reported_pose', None)
+        if not reported or len(reported) < self.num_servos:
+            return False
+
+        logical = [self.get_hardware_position(i, reported[i]) for i in range(self.num_servos)]
+        self.finger_positions = [float(v) for v in logical[:self.num_fingers]]
+        self.arm_positions = [float(v) for v in logical[self.num_fingers:]]
+        self.hardware_config['startup_pose'] = [int(round(v)) for v in reported]
+
+        # The bars may not exist yet when this runs during construction
+        for refresh in ('update_large_bar', 'update_small_servo_bars', 'update_visual_feedback'):
+            if hasattr(self, refresh):
+                try:
+                    getattr(self, refresh)()
+                except Exception:
+                    pass
+        # Plain ASCII on purpose: this runs before the first frame goes out, and
+        # a cp1252 console raises UnicodeEncodeError on the emoji the rest of
+        # this file logs with. Losing the sync to a failed log line would put
+        # the lurch straight back.
+        print(f"[POSE] Adopted board startup pose: {[int(round(v)) for v in reported]}")
+        return True
+
+    def get_startup_pose(self):
+        """The rig's rest pose, in degrees, one entry per channel.
+
+        Single source of truth for three things that must agree or the hand
+        jumps: the sketch's baked startupPositions[], the UI's opening slider
+        state, and the pose sent on reconnect. Stored by the listener generator
+        so whatever gets flashed is what the UI comes up holding.
+
+        Missing or short config falls back to the middle of the expressive
+        range rather than a fixed 90 -- on a rig configured 0-80, 90 is past
+        the end of everything."""
+        cfg = self.hardware_config
+        lo = cfg.get('global_min_angle', 0)
+        hi = cfg.get('global_max_angle', 180)
+        midpoint = (lo + hi) / 2.0
+
+        pose = list(cfg.get('startup_pose') or [])
+        while len(pose) < self.num_servos:
+            pose.append(midpoint)
+        pose = pose[:self.num_servos]
+
+        return [self.clamp_servo_angle(i, pose[i]) for i in range(self.num_servos)]
+
     def clamp_servo_angle(self, servo_idx, angle):
-        """Clamp a servo angle to its configured range."""
-        min_lim, max_lim = self.servo_limits[servo_idx]
+        """Clamp a servo angle to its EFFECTIVE range.
+
+        Effective = the channel's own limits intersected with the expressive
+        range, so setting the expressive range once covers every channel and
+        the per-channel limits are only needed where a channel wants something
+        tighter.
+
+        This used to consult only the per-channel limits, which let the sliders
+        and the stored state travel past the expressive range: the hardware got
+        the clamped value but the UI showed, and RECORDED, the unclamped one.
+        Takes then contained motion that never happened, and replayed
+        differently through a sketch that clamps correctly."""
+        min_lim, max_lim = self.effective_limits_for(servo_idx)
         angle = float(angle)
         return max(min_lim, min(max_lim, angle))
 
@@ -1378,8 +1634,16 @@ class SimpleHandControl:
         """Map logical angle to hardware angle with optional per-servo reversal."""
         logical_angle = self.clamp_servo_angle(servo_idx, logical_angle)
         if self.servo_reversed[servo_idx]:
-            min_lim, max_lim = self.servo_limits[servo_idx]
-            return max_lim - (logical_angle - min_lim)
+            # Mirror within the EFFECTIVE range, not the raw per-servo limits.
+            # Mirroring around limits wider than the expressive range threw the
+            # result past that range, where the clamp downstream flattened it:
+            # with limits 0-180 and an expressive range of 0-80, every logical
+            # angle from 0 to 100 came out as 80. The channel did not read as
+            # reversed, it read as dead -- and no export could match it either,
+            # since a sketch mirrors within the range it was given.
+            min_lim, max_lim = self.effective_limits_for(servo_idx)
+            logical_angle = max(min_lim, min(max_lim, logical_angle))
+            return min_lim + max_lim - logical_angle
         return logical_angle
 
     def save_servo_preset(self):
@@ -1407,6 +1671,7 @@ class SimpleHandControl:
             'servo_reversed': [bool(flag) for flag in self.servo_reversed],
             'cursor_settings': {
                 'wave': self.cursor_sensitivity.get(),
+                'wave_y': self.cursor_sensitivity_y.get(),
                 'range': self.servo_range.get(),
                 'gravity': self.wave_gravity.get(),
                 'offset': self.wave_offset.get()
@@ -1438,10 +1703,13 @@ class SimpleHandControl:
             with open(filename, 'r') as f:
                 preset = json.load(f)
 
+            # Presets written by the 8-servo build come back short. Accept any
+            # length up to the current channel count and pad the rest with
+            # defaults, rather than silently ignoring the whole preset.
             loaded_limits = preset.get('servo_limits', [])
-            if len(loaded_limits) == 8:
+            if loaded_limits:
                 new_limits = []
-                for item in loaded_limits:
+                for item in loaded_limits[:self.num_servos]:
                     if isinstance(item, dict):
                         min_lim = int(item.get('min', 0))
                         max_lim = int(item.get('max', 180))
@@ -1453,22 +1721,41 @@ class SimpleHandControl:
                     if min_lim > max_lim:
                         min_lim, max_lim = max_lim, min_lim
                     new_limits.append((min_lim, max_lim))
+                while len(new_limits) < self.num_servos:
+                    new_limits.append((0, 180))
                 self.servo_limits = new_limits
 
             loaded_reversed = preset.get('servo_reversed', [])
-            if isinstance(loaded_reversed, list) and len(loaded_reversed) == 8:
-                self.servo_reversed = [bool(flag) for flag in loaded_reversed]
+            if isinstance(loaded_reversed, list) and loaded_reversed:
+                flags = [bool(flag) for flag in loaded_reversed[:self.num_servos]]
+                while len(flags) < self.num_servos:
+                    flags.append(False)
+                self.servo_reversed = flags
 
             cursor_settings = preset.get('cursor_settings', {})
             if isinstance(cursor_settings, dict):
                 self.cursor_sensitivity.set(float(cursor_settings.get('wave', self.cursor_sensitivity.get())))
+                # presets saved before the X/Y split carry no 'wave_y'
+                self.cursor_sensitivity_y.set(float(cursor_settings.get('wave_y', self.cursor_sensitivity_y.get())))
                 self.servo_range.set(float(cursor_settings.get('range', self.servo_range.get())))
                 self.wave_gravity.set(float(cursor_settings.get('gravity', self.wave_gravity.get())))
                 self.wave_offset.set(float(cursor_settings.get('offset', self.wave_offset.get())))
 
+            # A preset that only touched the derived copies left every exporter
+            # reading the pre-load config -- push it through before anything
+            # redraws or generates.
+            self.push_servo_state_to_config()
+            if hasattr(self, 'config_reversed_vars'):
+                flagged = self.hardware_config['reversed_servos']
+                for i, var in enumerate(self.config_reversed_vars):
+                    if i < self.num_servos:
+                        var.set(i in flagged)
+
             self.apply_servo_limits_to_state()
             if hasattr(self, 'servo_min_vars'):
-                for i in range(min(8, len(self.servo_min_vars))):
+                # was min(8, ...): S8 and S9 kept displaying the previous
+                # preset's limits after a load
+                for i in range(min(self.num_servos, len(self.servo_min_vars))):
                     min_lim, max_lim = self.servo_limits[i]
                     self.servo_min_vars[i].set(min_lim)
                     self.servo_max_vars[i].set(max_lim)
@@ -1499,7 +1786,9 @@ class SimpleHandControl:
             return
             
         pos = all_positions[servo_idx]
-        min_lim, max_lim = self.servo_limits[servo_idx]
+        # Effective, not raw: the markers have to sit where the channel really
+        # stops, or the bar shows travel the hardware will never make.
+        min_lim, max_lim = self.effective_limits_for(servo_idx)
         pos = self.clamp_servo_angle(servo_idx, pos)
         bar_height = 350
         
@@ -1526,7 +1815,13 @@ class SimpleHandControl:
             self.large_bar_canvas.itemconfig(self.large_bar_fill, fill=color)
             self.large_bar_canvas.itemconfig(self.large_bar_value, text=f"{int(pos)}°")
             reverse_text = " ON" if self.servo_reversed[servo_idx] else " OFF"
-            self.large_bar_canvas.itemconfig(self.large_bar_range_label, text=f"Clamp: {min_lim}° - {max_lim}° | Rev:{reverse_text}")
+            # Name the binding constraint. "Clamp: 0-60" against a bar set to
+            # 0-180 otherwise looks like the bar is being ignored.
+            raw_lo, raw_hi = self.servo_limits[servo_idx]
+            source = "" if (min_lim, max_lim) == (raw_lo, raw_hi) else " (global)"
+            self.large_bar_canvas.itemconfig(
+                self.large_bar_range_label,
+                text=f"Clamp: {min_lim}° - {max_lim}°{source} | Rev:{reverse_text}")
     
     def update_small_servo_bars(self):
         """Update all small servo bars."""
@@ -1537,7 +1832,7 @@ class SimpleHandControl:
                 continue
                 
             pos = all_positions[i]
-            min_lim, max_lim = self.servo_limits[i]
+            min_lim, max_lim = self.effective_limits_for(i)
             pos = self.clamp_servo_angle(i, pos)
             bar_width = (pos / 180.0) * 150
             clamp_min_x = (min_lim / 180.0) * 150
@@ -1650,6 +1945,10 @@ class SimpleHandControl:
                                      bg=self.colors['bg_frame'], fg=self.colors['text_main'])
         contrib_frame.pack(fill=tk.X, padx=5, pady=5)
         
+        # Keyed by the CURRENT channel labels. The scratch helpers below ask
+        # for anatomy keys ("Wrist Tilt", "Wrist Rotate") that have never
+        # existed in this dict, so they go through arm_contrib() and fall
+        # back to 1.0 instead of raising KeyError.
         self.arm_contributions = {}
         for i, name in enumerate(self.arm_names):
             tk.Label(contrib_frame, text=f"{name} Contribution:", 
@@ -1710,24 +2009,31 @@ class SimpleHandControl:
         y_norm = event.y / max(self.canvas.winfo_height(), 1)
         
         # Get control parameters
-        sensitivity = self.cursor_sensitivity.get()
+        sensitivity_x = self.cursor_sensitivity.get()
+        sensitivity_y = self.cursor_sensitivity_y.get()
         servo_range = self.servo_range.get()
         gravity = self.wave_gravity.get()
         offset = self.wave_offset.get()
         
-        for i in range(self.num_fingers):
-            # Skip if this finger is disabled from wave control
-            if not self.finger_wave_enabled[i].get():
-                continue
-                
-            # Create wave pattern across fingers
-            finger_offset = (i / max(self.num_fingers - 1, 1)) - 0.5  # -0.5 to 0.5
-            
+        # Spread the wave across the channels that are actually ENABLED, not
+        # across all ten. Otherwise switching S5..S9 on would squash the five
+        # you already had into one corner of the waveform and change how every
+        # existing setup feels.
+        active = [i for i in range(self.num_servos) if self.wave_enabled[i].get()]
+
+        for slot, i in enumerate(active):
+            # Position within the wave, 0..1 across the enabled channels
+            finger_offset = (slot / max(len(active) - 1, 1)) - 0.5  # -0.5 to 0.5
+
             # Wave influence from X position
-            wave_influence = math.sin((x_norm + finger_offset) * math.pi * sensitivity)
-            
+            wave_influence = math.sin((x_norm + finger_offset) * math.pi * sensitivity_x)
+
             # Gravity pull from Y position (0=top pulls up, 1=bottom pulls down)
-            gravity_pull = (y_norm - 0.5) * 2  # -1 (top) to 1 (bottom)
+            # Y sensitivity scales how much of the pad's height you need to
+            # travel for full deflection; clamped so >1.0 saturates early
+            # rather than wrapping past the ends of the range.
+            gravity_pull = (y_norm - 0.5) * 2 * sensitivity_y  # -1 (top) to 1 (bottom)
+            gravity_pull = max(-1.0, min(1.0, gravity_pull))
             
             # Combine: wave creates the pattern, gravity pulls everything up/down
             total_influence = wave_influence * (1.0 - gravity) + gravity_pull * gravity
@@ -1749,9 +2055,14 @@ class SimpleHandControl:
                 angle = max_lim - (angle - min_lim)
 
             angle = self.clamp_servo_angle(i, angle)
-            
-            self.finger_positions[i] = angle
-        
+
+            # Channels 0-4 live in finger_positions, 5-9 in arm_positions --
+            # storage split only, the wave treats them identically
+            if i < self.num_fingers:
+                self.finger_positions[i] = angle
+            else:
+                self.arm_positions[i - self.num_fingers] = angle
+
         # Record if we're recording
         if self.layer_recording:
             self.record_current_state()
@@ -1798,8 +2109,8 @@ class SimpleHandControl:
     def perform_vertical_scratch(self, range_val, speed):
         """Perform vertical scratching movement."""
         # Move wrist tilt and elbow in coordination for vertical scratch
-        wrist_contrib = self.arm_contributions["Wrist Tilt"].get()
-        elbow_contrib = self.arm_contributions["Elbow"].get()
+        wrist_contrib = self.arm_contrib("Wrist Tilt")
+        elbow_contrib = self.arm_contrib("Elbow")
         
         # Simple up-down movement
         for i in range(5):
@@ -1817,7 +2128,7 @@ class SimpleHandControl:
     
     def perform_horizontal_scratch(self, range_val, speed):
         """Perform horizontal scratching movement."""
-        rotate_contrib = self.arm_contributions["Wrist Rotate"].get()
+        rotate_contrib = self.arm_contrib("Wrist Rotate")
         
         # Simple left-right movement
         for i in range(5):
@@ -1835,8 +2146,8 @@ class SimpleHandControl:
         """Perform circular scratching movement."""
         import math
         
-        rotate_contrib = self.arm_contributions["Wrist Rotate"].get()
-        tilt_contrib = self.arm_contributions["Wrist Tilt"].get()
+        rotate_contrib = self.arm_contrib("Wrist Rotate")
+        tilt_contrib = self.arm_contrib("Wrist Tilt")
         
         # Circular movement using both wrist rotate and tilt
         for i in range(20):
@@ -1892,8 +2203,7 @@ int baseDelay = (int)(500 / speed);
 
 void setup() {{
   Serial.begin(9600);
-  delay(100);  // Give serial time to initialize
-
+  
   // Attach arm servos (adjust pins as needed)
   wristRotate.attach(13);  // Pin for wrist rotate
   wristTilt.attach(14);    // Pin for wrist tilt
@@ -1913,8 +2223,8 @@ void loop() {{
         
         # Add the specific movement pattern
         if pattern == "vertical":
-            wrist_contrib = self.arm_contributions["Wrist Tilt"].get()
-            elbow_contrib = self.arm_contributions["Elbow"].get()
+            wrist_contrib = self.arm_contrib("Wrist Tilt")
+            elbow_contrib = self.arm_contrib("Elbow")
             
             code += f'''  // Vertical scratch movement
   for(int cycle = 0; cycle < 5; cycle++) {{
@@ -1930,7 +2240,7 @@ void loop() {{
   }}
 '''
         elif pattern == "horizontal":
-            rotate_contrib = self.arm_contributions["Wrist Rotate"].get()
+            rotate_contrib = self.arm_contrib("Wrist Rotate")
             
             code += f'''  // Horizontal scratch movement
   for(int cycle = 0; cycle < 5; cycle++) {{
@@ -1944,8 +2254,8 @@ void loop() {{
   }}
 '''
         elif pattern == "circular":
-            rotate_contrib = self.arm_contributions["Wrist Rotate"].get()
-            tilt_contrib = self.arm_contributions["Wrist Tilt"].get()
+            rotate_contrib = self.arm_contrib("Wrist Rotate")
+            tilt_contrib = self.arm_contrib("Wrist Tilt")
             
             code += f'''  // Circular scratch movement
   for(int i = 0; i < 20; i++) {{
@@ -2025,11 +2335,16 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             self.send_to_hardware()
             self.last_send_time = current_time
         
-        # Update visual feedback
+        # Update visual feedback. The timeline now draws real waveforms, so
+        # it runs at ~13Hz instead of every tick -- a full re-trace on the
+        # same thread as playback is exactly the kind of stall that shows up
+        # as chop at the servo.
         self.update_visual_feedback()
         self.update_large_bar()
         self.update_small_servo_bars()
-        self.update_timeline()
+        self._timeline_tick = (self._timeline_tick + 1) % 3
+        if self._timeline_tick == 0:
+            self.update_timeline()
         self.update_recording_status()
         
         # Schedule next iteration
@@ -2046,7 +2361,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         for i, angle in enumerate(all_positions):
             # In cursor wave mode, finger reversal is already applied in on_mouse_move.
             # Avoid double-reversing fingers on output.
-            if self.control_mode.get() == "cursor" and i < self.num_fingers:
+            if self.control_mode.get() == "cursor" and self.wave_enabled[i].get():
                 hardware_positions.append(self.clamp_servo_angle(i, angle))
             else:
                 hardware_positions.append(self.get_hardware_position(i, angle))
@@ -2144,15 +2459,22 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             return
         
         self.is_playing = not self.is_playing
-        self.markov_mode = False  # Regular play disables organic mode
-        
+        # Organic is a PROPERTY of playback now, not a rival transport. It used
+        # to be reachable only through a second play button, and pressing Play
+        # silently cleared it -- so the sliders sat there doing nothing and what
+        # you previewed was never what you exported.
+        self.markov_mode = bool(self.organic_enabled.get())
+
         if self.is_playing:
             # Start playing ALL recorded layers simultaneously
             self.playback_start_time = time.time()
             self.playback_index = 0
+            if self.markov_mode:
+                self.init_organic_state()
             self.playback_btn.configure(text="⏹️ Stop", fg_color=self.colors['accent_red'])
-            self.markov_btn.configure(fg_color=self.default_button_color)
-            print(f"▶️ Playing {len(self.recorded_layers)} layers simultaneously")
+            organic_note = (f" + organic (±{self.position_wobble.get()}°, "
+                            f"±{self.timing_jitter.get()}% jitter)") if self.markov_mode else ""
+            print(f"▶️ Playing {len(self.recorded_layers)} layers simultaneously{organic_note}")
         else:
             # Stop playback
             self.is_playing = False
@@ -2162,6 +2484,209 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         
         self.update_timeline()
     
+    # --- consolidated .ino export ------------------------------------------
+    EXPORT_MODES = [
+        ('basic',   'Basic loop',            'All layers, full detail, loops forever'),
+        ('pir',     'PIR state machine',     'Compressed idle/active/sleep states'),
+        ('markov',  'PIR Markov phrases',    'Segment shuffling between phrases'),
+        ('scratch', 'Scratch movement only', 'Arm scratch pattern, ignores layers'),
+    ]
+
+    def detect_export_mode(self):
+        """Pick the sketch that matches how the UI is currently set up.
+
+        The mode was previously implied by WHICH button you found, which is
+        why there were four of them. Here it is derived from the same state
+        that drives playback."""
+        if self.pir_enabled.get():
+            if self.pir_markov_enabled.get():
+                return 'markov'
+            return 'pir'
+        return 'basic'
+
+    def export_mode_available(self, mode):
+        """(ok, reason) for a mode given current state."""
+        if mode in ('basic', 'markov', 'pir') and not self.recorded_layers:
+            return False, "no layers recorded"
+        if mode == 'pir' and not self.pir_enabled.get():
+            return True, "PIR mode is off - will export current layers as states"
+        if mode == 'markov' and not self.pir_markov_enabled.get():
+            return True, "Markov is off in the PIR panel"
+        return True, ""
+
+    def open_export_dialog(self):
+        """One export door. Shows what will be written, from live UI state."""
+        if not self.recorded_layers and self.detect_export_mode() != 'scratch':
+            tkinter.messagebox.showwarning(
+                "Nothing to export",
+                "No layers recorded yet.\n\nRecord a pass first, or pick "
+                "\"Scratch movement only\" which does not use layers.")
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Export .ino")
+        dlg.configure(bg=self.colors['bg_main'])
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        detected = self.detect_export_mode()
+        mode_var = tk.StringVar(value=detected)
+
+        # --- sketch type ---
+        type_box = tk.LabelFrame(dlg, text="Sketch type", bg=self.colors['bg_frame'],
+                                 fg=self.colors['text_main'], font=('Arial', 9, 'bold'))
+        type_box.pack(fill=tk.X, padx=10, pady=(10, 6))
+        for key, label, blurb in self.EXPORT_MODES:
+            row = tk.Frame(type_box, bg=self.colors['bg_frame'])
+            row.pack(fill=tk.X, padx=6, pady=1)
+            suffix = "   ← matches current setup" if key == detected else ""
+            tk.Radiobutton(row, text=label + suffix, variable=mode_var, value=key,
+                           bg=self.colors['bg_frame'], fg=self.colors['text_main'],
+                           font=('Arial', 9, 'bold' if key == detected else 'normal'),
+                           selectcolor=self.colors['bg_dark'],
+                           anchor='w').pack(side=tk.LEFT)
+            tk.Label(row, text=blurb, bg=self.colors['bg_frame'],
+                     fg=self.colors['text_dim'], font=('Arial', 7)).pack(side=tk.LEFT, padx=8)
+
+        # --- what the sketch will actually contain, read from live state ---
+        info_box = tk.LabelFrame(dlg, text="Reflects current UI", bg=self.colors['bg_frame'],
+                                 fg=self.colors['text_main'], font=('Arial', 9, 'bold'))
+        info_box.pack(fill=tk.X, padx=10, pady=6)
+
+        cfg = self.hardware_config
+        speed = self.playback_speed.get()
+        loop_s = self.get_timeline_loop_duration()
+        rows = [
+            ("Layers", f"{len(self.recorded_layers)}"
+                       + (f"   loop {loop_s:.1f}s" if loop_s else "")),
+            ("Speed", f"{speed:.1f}x" + (f"   → {loop_s / speed:.1f}s exported"
+                                         if loop_s and speed else "")),
+            ("Channels", f"{self.num_servos}   S0-S{self.num_servos - 1}"),
+            ("Pins", ", ".join(str(p) for p in cfg['pin_mapping'])),
+            ("Baud", f"{cfg.get('baud_rate', 115200)}"),
+            ("PIR pin", f"D{cfg.get('pir_pin', 2)}"),
+        ]
+        for k, v in rows:
+            r = tk.Frame(info_box, bg=self.colors['bg_frame'])
+            r.pack(fill=tk.X, padx=6, pady=1)
+            tk.Label(r, text=k, width=10, anchor='w', bg=self.colors['bg_frame'],
+                     fg=self.colors['text_dim'], font=('Arial', 8)).pack(side=tk.LEFT)
+            tk.Label(r, text=v, anchor='w', bg=self.colors['bg_frame'],
+                     fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT)
+
+        # --- organic, mirroring the live sliders ---
+        org_box = tk.LabelFrame(dlg, text="Organic", bg=self.colors['bg_frame'],
+                                fg=self.colors['text_main'], font=('Arial', 9, 'bold'))
+        org_box.pack(fill=tk.X, padx=10, pady=6)
+        bake_var = tk.BooleanVar(value=bool(self.organic_enabled.get()))
+        tk.Checkbutton(org_box, text="Bake organic variation into the sketch",
+                       variable=bake_var, bg=self.colors['bg_frame'],
+                       fg=self.colors['text_main'], font=('Arial', 9),
+                       selectcolor=self.colors['bg_dark']).pack(anchor='w', padx=6, pady=(4, 0))
+        tk.Label(org_box,
+                 text=f"wobble ±{self.position_wobble.get():.1f}°    "
+                      f"jitter ±{self.timing_jitter.get():.0f}%    "
+                      f"pause {self.pause_chance.get():.0f}%"
+                      + ("" if self.organic_enabled.get()
+                         else "     (organic is currently OFF for playback)"),
+                 bg=self.colors['bg_frame'], fg=self.colors['text_dim'],
+                 font=('Arial', 8)).pack(anchor='w', padx=26, pady=(0, 5))
+
+        # --- name it, here, before anything is written ---
+        name_box = tk.LabelFrame(dlg, text="Save as", bg=self.colors['bg_frame'],
+                                 fg=self.colors['text_main'], font=('Arial', 9, 'bold'))
+        name_box.pack(fill=tk.X, padx=10, pady=6)
+        name_row = tk.Frame(name_box, bg=self.colors['bg_frame'])
+        name_row.pack(fill=tk.X, padx=6, pady=5)
+        name_var = tk.StringVar(value=getattr(self, 'pending_export_name', '') or '')
+        name_entry = tk.Entry(name_row, textvariable=name_var, width=34, font=('Arial', 9))
+        name_entry.pack(side=tk.LEFT)
+        tk.Label(name_row, text=".ino", bg=self.colors['bg_frame'],
+                 fg=self.colors['text_dim'], font=('Arial', 9)).pack(side=tk.LEFT, padx=(2, 8))
+        tk.Label(name_box, text="blank = timestamped name",
+                 bg=self.colors['bg_frame'], fg=self.colors['text_dim'],
+                 font=('Arial', 7)).pack(anchor='w', padx=8, pady=(0, 4))
+
+        status = tk.Label(dlg, text="", bg=self.colors['bg_main'],
+                          fg=self.colors['text_dim'], font=('Arial', 8), anchor='w')
+        status.pack(fill=tk.X, padx=12)
+
+        def refresh_status(*_):
+            ok, reason = self.export_mode_available(mode_var.get())
+            status.config(text=("⚠ " + reason) if reason else "")
+
+        mode_var.trace('w', refresh_status)
+        refresh_status()
+
+        btn_row = tk.Frame(dlg, bg=self.colors['bg_main'])
+        btn_row.pack(fill=tk.X, padx=10, pady=(4, 10))
+
+        def do_generate():
+            mode = mode_var.get()
+            ok, reason = self.export_mode_available(mode)
+            if not ok:
+                tkinter.messagebox.showwarning("Cannot export", reason)
+                return
+            # the exporters read organic off these vars, so make the choice
+            # in this dialog the one that actually takes effect
+            self.pending_export_name = name_var.get()
+            previous = self.organic_enabled.get()
+            self.organic_enabled.set(bake_var.get())
+            try:
+                dlg.destroy()
+                if mode == 'basic':
+                    self.export_arduino_code()
+                elif mode == 'pir':
+                    self.export_pir_state_machine()
+                elif mode == 'markov':
+                    self.export_markov_arduino()
+                elif mode == 'scratch':
+                    self.export_scratch_arduino()
+            finally:
+                self.organic_enabled.set(previous)
+
+        ctk.CTkButton(btn_row, text="Generate .ino", command=do_generate,
+                      font=('Arial', 11, 'bold'), width=140).pack(side=tk.RIGHT, padx=4)
+        ctk.CTkButton(btn_row, text="Cancel", command=dlg.destroy,
+                      font=('Arial', 11), width=90,
+                      fg_color='#c0c0c0', text_color='black',
+                      hover_color='#e0e0e0').pack(side=tk.RIGHT, padx=4)
+
+        dlg.update_idletasks()
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - dlg.winfo_width()) // 2)
+        y = self.root.winfo_rooty() + 60
+        dlg.geometry(f"+{x}+{y}")
+        return dlg
+
+    def init_organic_state(self):
+        """Reset the organic oscillators so a pass starts from a clean phase."""
+        self.wobble_offsets = [0.0] * self.num_servos
+        self.wobble_targets = [0.0] * self.num_servos
+        self.last_wobble_update = time.time()
+        self._organic_phases = [random.uniform(0, 2 * math.pi) for _ in range(self.num_servos)]
+        self._organic_start_time = time.time()
+        self.jitter_speed_multiplier = 1.0
+        self.jitter_speed_target = 1.0
+        self.last_jitter_update = time.time()
+        self.is_paused_at_keyframe = False
+        self.pause_until = 0
+
+    def on_organic_toggled(self):
+        """Organic switched while the transport may already be running."""
+        on = bool(self.organic_enabled.get())
+        if self.is_playing:
+            # take effect immediately -- the whole point is to hear the change
+            self.markov_mode = on
+            if on:
+                self.init_organic_state()
+        self.organic_btn.configure(
+            text=("▼ Organic Variations  [ON]" if on else "▼ Organic Variations")
+            if self.variation_expanded else
+            ("▶ Organic Variations  [ON]" if on else "▶ Organic Variations"))
+        print(f"🎲 Organic {'enabled' if on else 'disabled'} "
+              f"(wobble ±{self.position_wobble.get()}°, jitter ±{self.timing_jitter.get()}%, "
+              f"pause {self.pause_chance.get()}%)")
+
     def toggle_markov_playback(self):
         """Toggle organic/Markov playback mode with random variations."""
         if not self.recorded_layers:
@@ -2185,11 +2710,11 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             self.is_paused_at_keyframe = False
             self.pause_until = 0
             # Initialize wobble offsets
-            self.wobble_offsets = [0.0] * 8
-            self.wobble_targets = [0.0] * 8
+            self.wobble_offsets = [0.0] * self.num_servos
+            self.wobble_targets = [0.0] * self.num_servos
             self.last_wobble_update = time.time()
             # Reset organic sine wave phases for fresh start
-            self._organic_phases = [random.uniform(0, 2 * math.pi) for _ in range(8)]
+            self._organic_phases = [random.uniform(0, 2 * math.pi) for _ in range(self.num_servos)]
             self._organic_start_time = time.time()
             # Initialize timing jitter
             self.jitter_speed_multiplier = 1.0
@@ -2221,6 +2746,257 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         else:
             self.hw_config_content.pack_forget()
             self.hw_config_btn.configure(text="▶ Hardware Config")
+
+    def generate_listener_sketch(self):
+        """Build the listener sketch from the CURRENT hardware config.
+
+        Hand-editing a listener every time the rig is rewired is how the pin
+        map and the config drift apart, so this is generated from the same
+        dict the host sends against: same channel order, same pins, same baud,
+        same reversal set."""
+        cfg = self.hardware_config
+        pins = list(cfg['pin_mapping'])
+        n = self.num_servos
+        baud = int(cfg.get('baud_rate', 115200))
+        pir = int(cfg.get('pir_pin', 2))
+        reversed_ch = sorted(i for i in cfg.get('reversed_servos', []) if i < n)
+        # The BACKSTOP, not the expressive range. Baking the expressive range in
+        # meant every narrowing of it needed a reflash, and every widening of it
+        # was silently cut off by the sketch still holding the old value.
+        lo = int(cfg.get('firmware_safe_min', 0))
+        hi = int(cfg.get('firmware_safe_max', 180))
+        cmd = f"HAND{n}"
+
+        # Startup pose, baked from wherever the sliders sit right now. The old
+        # sketch attached every channel at the midpoint of the global range,
+        # which is a pose nothing was ever posed in -- on a 0-80 range that is
+        # 40 degrees on all ten, and the rig lurches there on power-up before
+        # the host has said anything. Run it through get_hardware_position so
+        # the baked value is byte-for-byte what a live frame would carry for
+        # that slider, reversal included.
+        live = list(self.finger_positions) + list(self.arm_positions)
+        startup = []
+        for i in range(n):
+            angle = live[i] if i < len(live) else 90.0
+            startup.append(int(round(self.get_hardware_position(i, angle))))
+        startup_str = ", ".join(str(v) for v in startup)
+
+        # Record what we baked. The UI opens holding this pose and reconnect
+        # resends it, so the board and the host agree on where "rest" is
+        # instead of the host overwriting the sketch's pose on first frame.
+        cfg['startup_pose'] = list(startup)
+
+        mapping = "\n".join(
+            f" * S{i} -> D{pins[i]}   startup {startup[i]}" for i in range(n))
+        frame_bytes = len(cmd) + 1 + n * 4
+        ms_at_baud = frame_bytes * 10 / baud * 1000
+
+        return f'''/*
+ * {n}-Servo Listener -- GENERATED from hardware config "{cfg.get('name', 'Default')}"
+ * Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+ *
+ * Receives: "{cmd},pos0,...,pos{n - 1}"
+ * Sends:    "PIR,1" on motion
+ *
+ * Channels are numbered, not named after anatomy -- this rig gets rewired
+ * per project. The channel index is what the protocol and the UI agree on;
+ * the pin is just where that channel is wired right now.
+ *
+{mapping}
+ *
+ * Startup pose is baked from the host UI sliders as they stood at generation
+ * time -- NOT the midpoint of the range. Re-pose the hand and regenerate to
+ * change where it wakes up.
+ *
+ * Positions are DEGREES, end to end: what the slider reads is what the servo
+ * is told. MIN_ANGLE/MAX_ANGLE below are a hardware backstop that clamps a bad
+ * frame, not the expressive range -- set the expressive range in the UI, where
+ * it is applied once. Nothing here rescales.
+ *
+ * PIR sensor on D{pir}.
+ * Baud {baud}: a {cmd} frame is ~{frame_bytes} bytes = ~{ms_at_baud:.1f}ms of wire time.
+ *
+ * Regenerate this from Hardware Config whenever pins, baud or reversal
+ * change, and reflash -- the host will not warn you if they drift apart.
+ */
+
+#include <Servo.h>
+
+const int NUM_SERVOS = {n};
+const int pins[NUM_SERVOS] = {{{', '.join(str(p) for p in pins)}}};
+
+const int PIR_PIN = {pir};
+bool lastPirState = false;
+unsigned long lastPirSendTime = 0;
+const unsigned long PIR_DEBOUNCE_MS = 200;
+
+const int MIN_ANGLE = {lo};
+const int MAX_ANGLE = {hi};
+
+// Where each channel wakes up, in degrees. Captured from the host sliders when
+// this file was generated -- see the header.
+const int startupPositions[NUM_SERVOS] = {{{startup_str}}};
+
+// Reversal ({', '.join(f'S{i}' for i in reversed_ch) if reversed_ch else 'none set'}) is applied by the HOST, in
+// get_hardware_position, before the frame goes out -- it is listed here for
+// reference only. Re-applying it in firmware would invert an already-inverted
+// value and cancel it out, which is what this sketch used to do.
+
+Servo servos[NUM_SERVOS];
+String inputBuffer = "";
+
+// One path for every write, so the startup pose and a live frame land in the
+// same place. Two copies of this arithmetic is how a rig ends up waking
+// somewhere it never gets sent.
+//
+// Degrees in, degrees out. This used to map 0-180 onto MIN..MAX, but the host
+// had ALREADY scaled the frame into that range, so the second scaling shrank
+// every move to roughly 44% of what was asked for. The range is a clamp -- a
+// hardware backstop against a bad frame -- not the expressive range. The
+// expressive range is the UI's, and it is applied there, once.
+void writeChannel(int channel, int deg) {{
+  servos[channel].write(constrain(deg, MIN_ANGLE, MAX_ANGLE));
+}}
+
+void setup() {{
+  Serial.begin({baud});
+  pinMode(PIR_PIN, INPUT);
+
+  for (int i = 0; i < NUM_SERVOS; i++) {{
+    servos[i].attach(pins[i]);
+    writeChannel(i, startupPositions[i]);
+  }}
+
+  delay(1000);
+  Serial.println("{n}-Servo Listener Ready - awaiting {cmd} commands");
+  Serial.print("PIR on D"); Serial.println(PIR_PIN);
+  Serial.print("Range "); Serial.print(MIN_ANGLE);
+  Serial.print("-"); Serial.println(MAX_ANGLE);
+  Serial.println("Reversed (host-side): {', '.join(f'S{i}' for i in reversed_ch) if reversed_ch else 'none'}");
+  for (int i = 0; i < NUM_SERVOS; i++) {{
+    Serial.print("S"); Serial.print(i);
+    Serial.print(" -> D"); Serial.print(pins[i]);
+    Serial.print(" start "); Serial.println(startupPositions[i]);
+  }}
+}}
+
+void loop() {{
+  bool pirState = digitalRead(PIR_PIN) == HIGH;
+  unsigned long now = millis();
+
+  if (pirState && !lastPirState && (now - lastPirSendTime > PIR_DEBOUNCE_MS)) {{
+    Serial.println("PIR,1");
+    lastPirSendTime = now;
+  }}
+  lastPirState = pirState;
+
+  while (Serial.available()) {{
+    char c = Serial.read();
+    if (c == '\\n') {{
+      processCommand(inputBuffer);
+      inputBuffer = "";
+    }} else if (c != '\\r') {{
+      inputBuffer += c;
+    }}
+  }}
+}}
+
+void processCommand(String command) {{
+  if (!command.startsWith("{cmd},")) return;
+
+  String data = command.substring({len(cmd) + 1});
+
+  int positions[NUM_SERVOS];
+  int parsed = 0;
+  int lastComma = -1;
+
+  for (int i = 0; i < NUM_SERVOS; i++) {{
+    int nextComma = data.indexOf(',', lastComma + 1);
+
+    if (nextComma == -1) {{
+      // Last field. A short or truncated frame must leave the remaining
+      // channels untouched, not slam them to whatever the tail happened
+      // to be -- so stop here rather than reusing it.
+      String tail = data.substring(lastComma + 1);
+      if (tail.length() == 0) break;
+      positions[i] = tail.toInt();
+      parsed = i + 1;
+      break;
+    }}
+
+    positions[i] = data.substring(lastComma + 1, nextComma).toInt();
+    parsed = i + 1;
+    lastComma = nextComma;
+  }}
+
+  for (int i = 0; i < parsed; i++) {{
+    writeChannel(i, positions[i]);
+  }}
+}}
+'''
+
+    def export_listener_sketch(self):
+        """Write the generated listener sketch next to the project."""
+        from tkinter import filedialog
+        # take whatever is currently typed in the config fields first, so the
+        # sketch matches what the user is looking at rather than the last save
+        try:
+            self.update_config_from_ui()
+        except Exception:
+            pass
+
+        default = f"listener_{self.num_servos}servo_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.ino"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".ino",
+            initialfile=default,
+            filetypes=[("Arduino sketch", "*.ino"), ("All files", "*.*")],
+            title="Save generated listener sketch",
+        )
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(self.generate_listener_sketch())
+            # generate_listener_sketch just recorded the pose it baked; persist
+            # it so the next UI launch opens holding what the board booted into
+            self.save_hardware_config()
+            cfg = self.hardware_config
+            tkinter.messagebox.showinfo(
+                "Listener Generated",
+                f"Saved: {os.path.basename(path)}\n\n"
+                f"Channels: {self.num_servos} (S0-S{self.num_servos - 1})\n"
+                f"Pins: {', '.join(str(p) for p in cfg['pin_mapping'])}\n"
+                f"Baud: {cfg.get('baud_rate', 115200)}\n"
+                f"PIR: D{cfg.get('pir_pin', 2)}\n"
+                f"Startup pose: baked from the current sliders\n"
+                f"Safe limit: {cfg.get('firmware_safe_min', 0)}-{cfg.get('firmware_safe_max', 180)}° "
+                f"(expressive range {cfg['global_min_angle']}-{cfg['global_max_angle']}° "
+                f"stays in the UI)\n\n"
+                "Flash this before connecting -- the host talks "
+                f"HAND{self.num_servos} at this baud.")
+            print(f"⚙ Listener sketch written to {path}")
+        except Exception as e:
+            tkinter.messagebox.showerror("Generate Failed", f"Could not write sketch:\n{e}")
+
+    def toggle_wave_config_panel(self, event=None):
+        """Toggle the wave tuning sliders."""
+        self.wave_cfg_expanded = not self.wave_cfg_expanded
+        if self.wave_cfg_expanded:
+            self.wave_cfg_content.pack(fill=tk.X)
+            self.wave_cfg_btn.configure(text="▼ Wave Config")
+        else:
+            self.wave_cfg_content.pack_forget()
+            self.wave_cfg_btn.configure(text="▶ Wave Config")
+
+    def toggle_pir_panel(self, event=None):
+        """Toggle the PIR state machine panel."""
+        self.pir_expanded = not self.pir_expanded
+        if self.pir_expanded:
+            self.pir_content.pack(fill=tk.X, pady=(0, 5))
+            self.pir_panel_btn.configure(text="▼ PIR State Machine")
+        else:
+            self.pir_content.pack_forget()
+            self.pir_panel_btn.configure(text="▶ PIR State Machine")
     
     def apply_and_save_config(self):
         """Apply hardware config from UI and save to file."""
@@ -2234,10 +3010,12 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
                 self.hand_controller.serial_connection.close()
                 self.hand_controller = HandExpressionController(
                     port=old_port,
+                    baudrate=self.hardware_config.get('baud_rate', 115200),
                     clean_output=True,
                     min_angle=self.hardware_config['global_min_angle'],
                     max_angle=self.hardware_config['global_max_angle']
                 )
+                self.sync_pose_from_board()
                 print(f"✅ Controller reinitialized with range {self.hardware_config['global_min_angle']}-{self.hardware_config['global_max_angle']}°")
             except Exception as e:
                 print(f"⚠️ Could not reinitialize controller: {e}")
@@ -2251,6 +3029,93 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
 
     # ==================== PIR STATE MACHINE METHODS ====================
     
+    def clear_recording_library(self):
+        """Wipe the recording library and every reference to it, for a fresh start.
+
+        clear_layers() handles what is loaded in memory; this handles what is on
+        disk plus the three state assignment lists, the library cache and the
+        listboxes. Clearing only the folder would leave the state cards pointing
+        at names that no longer resolve, which fails later at export rather than
+        here where it can be explained.
+
+        Archiving is the default rather than deleting: takes are the one thing in
+        this project that cannot be regenerated -- a config or a sketch can be
+        rebuilt from the UI in seconds, a performance cannot be re-performed.
+        """
+        from tkinter import filedialog  # noqa: F401  (kept local, as elsewhere here)
+
+        files = []
+        if os.path.isdir(self.pir_recordings_dir):
+            files = sorted(f for f in os.listdir(self.pir_recordings_dir)
+                           if f.lower().endswith('.json'))
+
+        assigned = (len(self.pir_idle_recordings) + len(self.pir_active_recordings)
+                    + len(self.pir_sleep_recordings))
+        if not files and not assigned:
+            tkinter.messagebox.showinfo("Nothing to Clear", "The recording library is already empty.")
+            return
+
+        total_mb = sum(
+            os.path.getsize(os.path.join(self.pir_recordings_dir, f))
+            for f in files) / (1024 * 1024) if files else 0.0
+
+        keep = tkinter.messagebox.askyesnocancel(
+            "Clear Recording Library",
+            f"{len(files)} recording(s), {total_mb:.1f} MB\n"
+            f"{assigned} state assignment(s) across IDLE / ACTIVE / SLEEP\n\n"
+            "YES  - move the files to a timestamped archive folder (recommended)\n"
+            "NO   - delete the files permanently\n"
+            "CANCEL - do nothing\n\n"
+            "Either way the state assignments and the library cache are cleared.")
+        if keep is None:
+            return
+
+        archived_to = None
+        try:
+            if keep and files:
+                stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                archived_to = os.path.join(
+                    os.path.dirname(self.pir_recordings_dir), f'pir_recordings_archive_{stamp}')
+                os.makedirs(archived_to, exist_ok=True)
+                for name in files:
+                    shutil.move(os.path.join(self.pir_recordings_dir, name),
+                                os.path.join(archived_to, name))
+            elif files:
+                for name in files:
+                    os.remove(os.path.join(self.pir_recordings_dir, name))
+        except Exception as e:
+            tkinter.messagebox.showerror(
+                "Clear Failed",
+                f"Stopped partway through:\n{e}\n\n"
+                "The state assignments have NOT been cleared, so what is left on "
+                "disk still matches what the UI is showing.")
+            return
+
+        # Only now drop the references -- if the file move had failed above, the
+        # assignments still describe what is actually there.
+        self.pir_idle_recordings.clear()
+        self.pir_active_recordings.clear()
+        self.pir_sleep_recordings.clear()
+        self.pir_cached_recordings.clear()
+        self.pir_recording_index = {'idle': 0, 'active': 0, 'sleep': 0}
+        self.pir_recording_progress = 0.0
+        self.pir_crossfade_to_next = False
+
+        for state in ('idle', 'active', 'sleep'):
+            listbox = self.get_pir_state_listbox(state)
+            if listbox is not None:
+                listbox.delete(0, tk.END)
+        if hasattr(self, 'update_pir_recording_combos'):
+            self.update_pir_recording_combos()
+
+        where = f"Archived to:\n{os.path.basename(archived_to)}" if archived_to else "Files deleted permanently."
+        tkinter.messagebox.showinfo(
+            "Library Cleared",
+            f"{len(files)} recording(s) cleared.\n{where}\n\n"
+            "In-memory layers are untouched -- use Clear All for those.")
+        print(f"[LIBRARY] Cleared {len(files)} recording(s); "
+              f"{'archived to ' + archived_to if archived_to else 'deleted permanently'}")
+
     def scan_pir_recordings_library(self):
         """Scan pir_recordings and movement_recordings folders for available recordings."""
         recordings = []
@@ -2437,9 +3302,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
     def _do_add_pir_recording(self, state, listbox, recording_name):
         """Actually add the recording to the state's list."""
         # Get the right list
-        if state == 'continuous':
-            rec_list = self.continuous_recordings
-        elif state == 'idle':
+        if state == 'idle':
             rec_list = self.pir_idle_recordings
         elif state == 'active':
             rec_list = self.pir_active_recordings
@@ -2461,14 +3324,12 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         selection = listbox.curselection()
         if not selection:
             return
-
+        
         idx = selection[0]
         recording_name = listbox.get(idx)
-
+        
         # Get the right list
-        if state == 'continuous':
-            rec_list = self.continuous_recordings
-        elif state == 'idle':
+        if state == 'idle':
             rec_list = self.pir_idle_recordings
         elif state == 'active':
             rec_list = self.pir_active_recordings
@@ -2488,97 +3349,42 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         """Legacy compatibility - now a no-op since we use listboxes."""
         pass  # Listboxes are updated directly via add/remove
     
-    def on_chain_mode_change(self):
-        """Switch between continuous and sensor-reactive modes."""
-        mode = self.chain_mode.get()
-
-        if mode == 'continuous':
-            # Show continuous frame, hide sensor frame
-            self.continuous_frame.pack(fill=tk.X, padx=10, pady=5)
-            self.sensor_frame.pack_forget()
-        else:  # sensor
-            # Show sensor frame, hide continuous frame
-            self.continuous_frame.pack_forget()
-            self.sensor_frame.pack(fill=tk.X, padx=10, pady=5)
-
-        # Disable PIR mode when switching to prevent conflicts
-        if self.pir_enabled.get():
-            self.pir_enabled.set(False)
-            self.on_pir_toggle()
-
     def on_pir_toggle(self):
-        """Toggle PIR/Continuous testing mode."""
+        """Toggle PIR testing mode."""
         if self.pir_enabled.get():
-            mode = self.chain_mode.get()
-
-            if mode == 'continuous':
-                # Enable Continuous Loop mode
-                # Copy continuous recordings to idle state so playback logic works
-                self.pir_idle_recordings = self.continuous_recordings.copy()
-                self.pir_active_recordings = []
-                self.pir_sleep_recordings = []
-
-                self.pir_state = 'idle'  # Always stay in idle for continuous mode
-                self.pir_state_start_time = time.time()
-                self.pir_last_motion_time = time.time()
-
-                # Randomize starting recording
-                self._randomize_pir_state_recording('idle')
-                self.pir_crossfade_target_idx = self.pir_recording_index.get('idle', 0)
-
-                # Initialize crossfade system
-                self._schedule_next_crossfade()
-
-                # Initialize Markov if enabled
-                if self.pir_markov_enabled.get():
-                    self._rebuild_markov_segments()
-
-                # Start playback
-                if not self.is_playing:
-                    self.is_playing = True
-                    self.playback_start_time = time.time()
-
-                print(f"🔴 Continuous Loop enabled - playing {len(self.continuous_recordings)} recordings")
-
-            else:  # sensor mode
-                # Enable PIR Sensor-Reactive mode
-                self.pir_state = 'idle'
-                self.pir_state_start_time = time.time()
-                self.pir_last_motion_time = time.time()  # Start fresh
-                self.pir_simulate_btn.configure(state='normal')
-                self.update_pir_state_display()
-
-                # Randomize starting recording per state so we don't bias index 0.
-                for state_name in ['idle', 'active', 'sleep']:
-                    self._randomize_pir_state_recording(state_name)
-                self.pir_crossfade_target_idx = self.pir_recording_index.get(self.pir_state, 0)
-
-                # Initialize crossfade system
-                self._schedule_next_crossfade()
-
-                # Initialize Markov if enabled
-                if self.pir_markov_enabled.get():
-                    self._rebuild_markov_segments()
-
-                # Start PIR playback if we have recordings assigned
-                if not self.is_playing:
-                    self.is_playing = True
-                    self.playback_start_time = time.time()
-
-                print(f"🔴 PIR Mode enabled - starting in IDLE state")
-        else:
-            # Disable PIR/Continuous mode
+            # Enable PIR mode
             self.pir_state = 'idle'
-            if hasattr(self, 'pir_simulate_btn'):
-                self.pir_simulate_btn.configure(state='disabled')
-            if hasattr(self, 'pir_state_label'):
-                self.pir_state_label.config(text="OFF", bg='#888888')
-                self.pir_rec_label.config(text="")
-                self.pir_timer_label.config(text="")
+            self.pir_state_start_time = time.time()
+            self.pir_last_motion_time = time.time()  # Start fresh
+            self.pir_simulate_btn.configure(state='normal')
+            self.update_pir_state_display()
 
-            mode = self.chain_mode.get()
-            mode_name = "Continuous Loop" if mode == 'continuous' else "PIR Mode"
-            print(f"⚪ {mode_name} disabled")
+            # Randomize starting recording per state so we don't bias index 0.
+            for state_name in ['idle', 'active', 'sleep']:
+                self._randomize_pir_state_recording(state_name)
+            self.pir_crossfade_target_idx = self.pir_recording_index.get(self.pir_state, 0)
+            
+            # Initialize crossfade system
+            self._schedule_next_crossfade()
+            
+            # Initialize Markov if enabled
+            if self.pir_markov_enabled.get():
+                self._rebuild_markov_segments()
+            
+            # Start PIR playback if we have recordings assigned
+            if not self.is_playing:
+                self.is_playing = True
+                self.playback_start_time = time.time()
+            
+            print(f"🔴 PIR Mode enabled - starting in IDLE state")
+        else:
+            # Disable PIR mode
+            self.pir_state = 'idle'
+            self.pir_simulate_btn.configure(state='disabled')
+            self.pir_state_label.config(text="OFF", bg='#888888')
+            self.pir_rec_label.config(text="")
+            self.pir_timer_label.config(text="")
+            print("⚪ PIR Mode disabled")
 
     def _randomize_pir_state_recording(self, state):
         """Pick a random current recording index for the given PIR state."""
@@ -2606,7 +3412,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
                 line = ser.readline().decode('utf-8', errors='ignore').strip()
                 
                 # Debug: show any incoming serial data
-                if line and not line.startswith("8-Servo"):  # Skip startup messages
+                if line and not line.startswith("8-Servo") and not line.startswith("10-Servo"):  # Skip startup messages
                     print(f"📥 Arduino: {line}")
                 
                 # Check for PIR event
@@ -2681,12 +3487,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         
         elif self.pir_state == 'idle':
             # Check if we should go to sleep
-            try:
-                sleep_timeout_sec = self.pir_sleep_timeout.get() * 60  # Convert minutes to seconds
-            except (ValueError, tk.TclError):
-                sleep_timeout_sec = 1800  # Default to 30 minutes if field is empty/invalid
-            if sleep_timeout_sec <= 0:
-                sleep_timeout_sec = float('inf')  # Disable sleep if set to 0
+            sleep_timeout_sec = self.pir_sleep_timeout.get() * 60  # Convert minutes to seconds
             if time_since_motion >= sleep_timeout_sec:
                 self.pir_previous_state = 'idle'
                 self.pir_state = 'sleep'
@@ -3033,7 +3834,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         # Calculate Arduino memory size (matches export settings).
         samples_per_seg = self.HARDWARE_SAMPLES_PER_SEG
         top_k = self.HARDWARE_TOP_K_TRANSITIONS
-        bytes_per_segment = samples_per_seg * 8 + (top_k * 2)  # data + sparse transitions
+        bytes_per_segment = samples_per_seg * self.num_servos + (top_k * 2)  # data + sparse transitions
         total_bytes = total_segs * bytes_per_segment
         total_kb = total_bytes / 1024
         
@@ -3085,10 +3886,14 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         
         # Initialize with None
         samples = []
-        
+        rest_pose = [float(v) for v in self.get_startup_pose()]
+
         for sample_idx in range(num_samples):
             t = sample_idx / sample_rate
-            positions = [90] * 8  # Default center
+            # Rest pose, not a hardcoded 90: 90 sits outside any range narrower
+            # than it, so unrecorded channels saturated at the top of their
+            # travel instead of staying put.
+            positions = list(rest_pose)
             
             for layer in layers:
                 data = layer.get('data', [])
@@ -3126,7 +3931,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
                             positions[finger_idx] = pv + (nv - pv) * factor
                 
                 # Apply arm positions
-                for arm_idx in range(3):
+                for arm_idx in range(self.num_arm_servos):
                     prev_arm = prev_point.get('arm_positions', [])
                     next_arm = next_point.get('arm_positions', [])
                     if arm_idx < len(prev_arm) and arm_idx < len(next_arm):
@@ -3164,7 +3969,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
                 
                 # Calculate distance (sum of squared differences)
                 dist = 0
-                for k in range(8):
+                for k in range(self.num_servos):
                     diff = end_pos[k] - start_pos[k]
                     dist += diff * diff
                 dist = math.sqrt(dist)
@@ -3348,7 +4153,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             
             pos_a = current_seg['data'][sample_idx]
             pos_b = current_seg['data'][sample_idx + 1]
-            positions = [pos_a[i] + (pos_b[i] - pos_a[i]) * interp_factor for i in range(8)]
+            positions = [pos_a[i] + (pos_b[i] - pos_a[i]) * interp_factor for i in range(self.num_servos)]
         else:
             # Full-fidelity mode: direct sample lookup
             sample_idx = min(int(progress * num_samples), num_samples - 1)
@@ -3362,7 +4167,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             bf = blend_factor
             blend_factor = bf * bf * bf * (bf * (bf * 6.0 - 15.0) + 10.0)
             
-            for i in range(8):
+            for i in range(self.num_servos):
                 old_pos = self.pir_prev_segment_end_positions[i]
                 new_pos = positions[i]
                 positions[i] = old_pos + (new_pos - old_pos) * blend_factor
@@ -3444,81 +4249,6 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             return None
         return self.load_pir_recording(target_name)
     
-    def export_continuous_loop(self):
-        """Export continuous loop Arduino sketch without PIR state machine."""
-        # Validate that we have recordings
-        if not self.continuous_recordings:
-            tkinter.messagebox.showwarning("No Recordings",
-                "Please add at least one recording to the Movement Library before exporting.")
-            return
-
-        # Load all recordings
-        recordings = []
-        for rec_name in self.continuous_recordings:
-            if rec_name and rec_name != '(None)':
-                layers = self.load_pir_recording(rec_name)
-                if layers:
-                    recordings.append({'name': rec_name, 'layers': layers})
-                    print(f"📂 Loaded {rec_name} ({len(layers)} layers)")
-                else:
-                    print(f"⚠️ Could not load recording: {rec_name}")
-
-        if not recordings:
-            tkinter.messagebox.showerror("Load Failed", "Could not load any of the assigned recordings.")
-            return
-
-        # Generate the Arduino code - use Markov if enabled
-        if self.pir_markov_enabled.get():
-            # Create a fake recordings dict with only 'idle' state for Markov generation
-            recordings_dict = {'idle': recordings, 'active': [], 'sleep': []}
-            code = self.generate_markov_continuous_code(recordings_dict)
-            mode_str = "Markov"
-        else:
-            code = self.generate_continuous_crossfade_code(recordings)
-            mode_str = "Crossfade"
-
-        # Save to file
-        filename = f"continuous_{mode_str.lower()}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.ino"
-        filepath = os.path.join(os.getcwd(), filename)
-
-        try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(code)
-
-            rec_list_str = ", ".join([r['name'] for r in recordings])
-            tkinter.messagebox.showinfo("Export Successful",
-                f"Exported continuous loop Arduino sketch:\n\n"
-                f"File: {filename}\n"
-                f"Mode: {mode_str}\n"
-                f"Recordings: {len(recordings)}\n"
-                f"  {rec_list_str}\n\n"
-                f"Upload this sketch to your Arduino to run the continuous movement loop.")
-            print(f"✅ Exported: {filename}")
-        except Exception as e:
-            tkinter.messagebox.showerror("Export Failed", f"Failed to write file:\n{e}")
-            print(f"❌ Export failed: {e}")
-
-    def generate_continuous_crossfade_code(self, recordings):
-        """Generate Arduino code for continuous crossfade without PIR."""
-        # Wrap recordings in the expected format and use the existing PIR generator
-        # but strip out the PIR sensor and state machine logic
-        recordings_dict = {'idle': recordings, 'active': [], 'sleep': []}
-        full_code = self.generate_pir_state_machine_code(recordings_dict)
-
-        # Remove PIR-specific code and simplify to just continuous loop
-        # For now, just use the PIR code generator (will work but has extra state machine)
-        # TODO: Could create a cleaner generator without state machine overhead
-        return full_code.replace("PIR Sensor State Machine", "Continuous Loop (Crossfade)")
-
-    def generate_markov_continuous_code(self, recordings_dict):
-        """Generate Arduino code for continuous Markov without PIR states."""
-        full_code = self.generate_markov_pir_code(recordings_dict)
-
-        # Simplify: remove PIR sensor logic, keep only 'idle' state running continuously
-        # For now, just use the Markov PIR code generator
-        # TODO: Could create a cleaner generator without state machine overhead
-        return full_code.replace("PIR Sensor State Machine", "Continuous Loop (Markov)")
-
     def export_pir_state_machine(self):
         """Export the complete PIR State Machine to Arduino .ino file."""
         # Validate that we have recordings assigned
@@ -3607,14 +4337,18 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         pins = hw['pin_mapping']
         reversed_servos = hw['reversed_servos']
         # Use hardware config limits (matches listener behavior: 0-45 for the physical servos)
-        min_angle = hw['global_min_angle']
-        max_angle = hw['global_max_angle']
+        # Backstop only. The clamp the piece was performed with is per
+        # channel, and a standalone sketch has no host to apply it.
+        eff_min_str, eff_max_str = self.effective_limits_c_arrays()
+        min_angle = hw.get('firmware_safe_min', 0)
+        max_angle = hw.get('firmware_safe_max', 180)
         
         # Timing config
         active_duration_ms = int(self.pir_active_duration.get() * 1000)
         sleep_timeout_ms = int(self.pir_sleep_timeout.get() * 60 * 1000)
         blend_time_ms = int(self.pir_transition_time.get() * 1000)
-        
+        startup_lockout_ms = int(self.pir_startup_lockout.get() * 1000)
+
         # Crossfade config
         crossfade_enabled = 'true' if self.pir_crossfade_enabled.get() else 'false'
         crossfade_interval_min = int(self.pir_crossfade_interval_min.get() * 1000)
@@ -3622,14 +4356,24 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         crossfade_duration_min = int(self.pir_crossfade_duration_min.get() * 1000)
         crossfade_duration_max = int(self.pir_crossfade_duration_max.get() * 1000)
         
-        # Organic wobble config
-        wobble_amount = float(self.position_wobble.get())
-        
+        # Decide the channel set and per-take sample counts before any array is
+        # emitted -- both the declarations and the lookup code depend on them.
+        (self._pir_active_channels, self._pir_sample_plan,
+         self._pir_sample_rate) = self.plan_pir_data(recordings)
+
+        # Organic wobble config. The toggle is the single source of truth, the
+        # same way the movement exporter treats it: off means a literal 0.0 in
+        # the sketch. This used to read the slider unconditionally, so with
+        # Organic Variations switched OFF the preview replayed the take clean
+        # while the exported sketch layered a continuous sine drift over every
+        # channel -- small, always moving, and present in the sketch only.
+        wobble_amount = float(self.position_wobble.get()) if self.organic_enabled.get() else 0.0
+
         # Count total recordings per state for comments
         rec_counts = {s: len(recs) for s, recs in recordings.items()}
 
         # Startup pose: use first sample from first available recording (prefer IDLE).
-        startup_positions = [90] * 8
+        startup_positions = [90] * self.num_servos
         startup_layers = None
         for state_name in ['idle', 'active', 'sleep']:
             state_recs = recordings.get(state_name, [])
@@ -3645,16 +4389,16 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         
         code = f'''// PIR State Machine - Auto-generated by Hand Control Interface
 // Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-//
+// 
 // State Machine:
 //   MOTION DETECTED -> ACTIVE state (plays active recordings)
-//   After {self.pir_active_duration.get()}s no motion -> IDLE state
+//   After {self.pir_active_duration.get()}s no motion -> IDLE state  
 //   After {self.pir_sleep_timeout.get()} min idle -> SLEEP state
 //   Any motion -> back to ACTIVE
 //
 // Recordings per state:
 //   IDLE: {rec_counts.get('idle', 0)} recordings
-//   ACTIVE: {rec_counts.get('active', 0)} recordings
+//   ACTIVE: {rec_counts.get('active', 0)} recordings  
 //   SLEEP: {rec_counts.get('sleep', 0)} recordings
 //
 // Smooth blending between states over {self.pir_transition_time.get()}s
@@ -3662,14 +4406,16 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
 #include <Servo.h>
 
 // ==================== CONFIGURATION ====================
-#define PIR_PIN {hw.get('pir_pin', 2)}  // PIR sensor input pin
-#define NUM_SERVOS 8
+#define PIR_PIN {self.hardware_config.get('pir_pin', 2)}  // PIR sensor input pin
+#define NUM_SERVOS {self.num_servos}
 #define UPDATE_INTERVAL 5  // ms between servo updates (200Hz)
 
 // Timing (milliseconds)
 const unsigned long ACTIVE_DURATION = {active_duration_ms}UL;
 const unsigned long SLEEP_TIMEOUT = {sleep_timeout_ms}UL;
 const unsigned long BLEND_TIME = {blend_time_ms}UL;
+// Hold IDLE and ignore the sensor for this long after power-up (0 = disabled).
+const unsigned long STARTUP_LOCKOUT = {startup_lockout_ms}UL;
 
 // Servo pin mapping
 const int servoPins[NUM_SERVOS] = {{{', '.join(map(str, pins))}}};
@@ -3678,11 +4424,16 @@ const int servoPins[NUM_SERVOS] = {{{', '.join(map(str, pins))}}};
 const int startupPositions[NUM_SERVOS] = {{{startup_positions_str}}};
 
 // Reversed servo flags
-const bool servoReversed[NUM_SERVOS] = {{{', '.join(['true' if i in reversed_servos else 'false' for i in range(8)])}}};
+const bool servoReversed[NUM_SERVOS] = {{{', '.join(['true' if i in reversed_servos else 'false' for i in range(self.num_servos)])}}};
 
-// Angle limits
+// Angle limits. MIN/MAX are the hardware backstop; the per-channel arrays are
+// the range the piece was actually performed with (per-servo limit intersected
+// with the UI's expressive range) and are what playback clamps to. There is no
+// host in this sketch to apply them, so they are compiled in.
 const int MIN_ANGLE = {min_angle};
 const int MAX_ANGLE = {max_angle};
+const int servoMin[NUM_SERVOS] = {{{eff_min_str}}};
+const int servoMax[NUM_SERVOS] = {{{eff_max_str}}};
 
 // ==================== STATE MACHINE ====================
 enum State {{ STATE_IDLE, STATE_ACTIVE, STATE_SLEEP }};
@@ -3712,6 +4463,13 @@ const unsigned long MIN_CROSSFADE_DURATION = {crossfade_duration_min}UL;  // Min
 const unsigned long MAX_CROSSFADE_DURATION = {crossfade_duration_max}UL;  // Max crossfade length
 const bool CROSSFADE_ENABLED = {crossfade_enabled};  // Enable organic crossfading between recordings
 const int MAX_STEP_PER_UPDATE = 2;  // Slew-rate limit to reduce twitchy jumps
+
+// Only the channels that were actually recorded are stored in the movement
+// tables; the rest hold REST_POSE. A constant column costs the same flash as a
+// moving one, and that flash is what limits the sample rate.
+#define NUM_STORED_CH {len(self._pir_active_channels)}
+const uint8_t STORED_CH[NUM_STORED_CH] PROGMEM = {{{', '.join(str(c) for c in self._pir_active_channels)}}};
+const int REST_POSE[NUM_SERVOS] = {{{', '.join(str(int(round(v))) for v in self.get_startup_pose())}}};
 
 // Organic sine wave wobble (adds life-like micro-movements)
 const float WOBBLE_AMOUNT = {wobble_amount};  // Max degrees of wobble (0 = disabled)
@@ -3747,15 +4505,20 @@ Servo servos[NUM_SERVOS];
 // ==================== HELPER FUNCTIONS ====================
 
 int applyServoLimits(int angle, int servoIdx) {
-  // Map 0-180 stored value to MIN_ANGLE-MAX_ANGLE output (matches listener behavior)
-  int pos = map(angle, 0, 180, MIN_ANGLE, MAX_ANGLE);
-  pos = constrain(pos, MIN_ANGLE, MAX_ANGLE);
-  
-  // Apply reversal WITHIN the output range (matches listener: MAX_ANGLE - pos)
+  // Degrees in, degrees out. Recorded values are already the degrees the UI
+  // was showing, so rescaling them onto MIN..MAX (as this used to) shrank
+  // every playback against the take it was recorded from. The range clamps.
+  int lo = servoMin[servoIdx];
+  int hi = servoMax[servoIdx];
+  int pos = constrain(angle, lo, hi);
+
+  // Mirror within THIS channel's range. A shared MAX_ANGLE - pos only lands
+  // correctly when every channel starts at 0; on a 20-160 channel it threw
+  // the servo 20 degrees off, which read as "the reversal didn't take".
   if (servoReversed[servoIdx]) {
-    pos = MAX_ANGLE - pos;
+    pos = lo + hi - pos;
   }
-  return pos;
+  return constrain(pos, MIN_ANGLE, MAX_ANGLE);
 }
 
 int blendPositions(int from, int to, float factor) {
@@ -4024,9 +4787,8 @@ void updateServos() {
 
 void setup() {
   Serial.begin(9600);
-  delay(100);  // Give serial time to initialize
   Serial.println("PIR State Machine Starting...");
-
+  
   // Seed random number generator for recording selection
   randomSeed(analogRead(0));
   
@@ -4092,10 +4854,25 @@ void setup() {
 
 void loop() {
   // Check PIR sensor
+  // Startup lockout: hold IDLE and ignore the sensor entirely until the
+  // lockout expires. The read is skipped rather than the result discarded --
+  // triggerMotion() stamps lastMotionTime, so merely ignoring the state change
+  // would still reset the sleep timer from a settling sensor. millis() cannot
+  // wrap inside the lockout, so a plain comparison is safe here.
+  if (millis() < STARTUP_LOCKOUT) {
+    currentState = STATE_IDLE;
+    previousState = STATE_IDLE;
+    stateBlendFactor = 1.0;
+    lastMotionTime = 0;
+    updateServos();
+    delay(UPDATE_INTERVAL);
+    return;
+  }
+
   if (digitalRead(PIR_PIN) == HIGH) {
     triggerMotion();
   }
-  
+
   // Update state machine
   checkStateTransitions();
   
@@ -4127,20 +4904,25 @@ void loop() {
         hw = self.hardware_config
         pins = hw['pin_mapping']
         reversed_servos = hw['reversed_servos']
-        min_angle = hw['global_min_angle']
-        max_angle = hw['global_max_angle']
+        # Backstop only. The clamp the piece was performed with is per
+        # channel, and a standalone sketch has no host to apply it.
+        eff_min_str, eff_max_str = self.effective_limits_c_arrays()
+        min_angle = hw.get('firmware_safe_min', 0)
+        max_angle = hw.get('firmware_safe_max', 180)
         
         # Timing config
         active_duration_ms = int(self.pir_active_duration.get() * 1000)
         sleep_timeout_ms = int(self.pir_sleep_timeout.get() * 60 * 1000)
         blend_time_ms = int(self.pir_transition_time.get() * 1000)
-        
+        startup_lockout_ms = int(self.pir_startup_lockout.get() * 1000)
+
         # Markov config
         segment_length = self.pir_markov_segment_length.get()
         segment_length_ms = int(segment_length * 1000)
         chaos = self.pir_markov_chaos.get() / 100.0
         markov_blend_ms = int(self.pir_markov_blend_time.get() * 1000)
-        wobble_amount = float(self.position_wobble.get())
+        # Gated on the toggle, as in the other exporters -- see the note there.
+        wobble_amount = float(self.position_wobble.get()) if self.organic_enabled.get() else 0.0
         
         # Build segments for each state
         all_segments = {'idle': [], 'active': [], 'sleep': []}
@@ -4197,7 +4979,7 @@ void loop() {
                         else:
                             # Calculate similarity (smaller distance = higher prob)
                             dist = 0
-                            for k in range(8):
+                            for k in range(self.num_servos):
                                 diff = seg_i['end'][k] - seg_j['start'][k]
                                 dist += diff * diff
                             dist = math.sqrt(dist)
@@ -4222,13 +5004,13 @@ void loop() {
         
         # Calculate and display actual memory usage
         total_segs = sum(len(segs) for segs in all_segments.values())
-        seg_bytes = total_segs * SAMPLES_PER_SEG * 8
+        seg_bytes = total_segs * SAMPLES_PER_SEG * self.num_servos
         trans_bytes = total_segs * TOP_K_TRANSITIONS * 2  # idx + prob per transition
         total_data_kb = (seg_bytes + trans_bytes) / 1024
         print(f"[MARKOV EXPORT] {total_segs} segments, ~{total_data_kb:.1f}KB data")
 
         # Startup pose from first available segment start (prefer IDLE).
-        startup_positions = [90] * 8
+        startup_positions = [90] * self.num_servos
         for state_name in ['idle', 'active', 'sleep']:
             segs = all_segments.get(state_name, [])
             if segs:
@@ -4248,17 +5030,21 @@ void loop() {
 #include <Servo.h>
 
 // ==================== CONFIGURATION ====================
-#define PIR_PIN {hw.get('pir_pin', 2)}
-#define NUM_SERVOS 8
+#define PIR_PIN {self.hardware_config.get('pir_pin', 2)}
+#define NUM_SERVOS {self.num_servos}
 #define UPDATE_INTERVAL 20
 #define SAMPLES_PER_SEGMENT {SAMPLES_PER_SEG}
 #define TOP_K_TRANS {TOP_K_TRANSITIONS}
 
 const int servoPins[NUM_SERVOS] = {{{', '.join(map(str, pins))}}};
-const bool servoReversed[NUM_SERVOS] = {{{', '.join('true' if i in reversed_servos else 'false' for i in range(8))}}};
+const bool servoReversed[NUM_SERVOS] = {{{', '.join('true' if i in reversed_servos else 'false' for i in range(self.num_servos))}}};
 const int startupPositions[NUM_SERVOS] = {{{startup_positions_str}}};
+// SERVO_MIN/MAX are the hardware backstop; the per-channel arrays are the
+// range the piece was performed with and are what playback clamps to.
 const int SERVO_MIN = {min_angle};
 const int SERVO_MAX = {max_angle};
+const int servoMin[NUM_SERVOS] = {{{eff_min_str}}};
+const int servoMax[NUM_SERVOS] = {{{eff_max_str}}};
 
 // Timing
 const unsigned long ACTIVE_DURATION = {active_duration_ms}UL;
@@ -4266,6 +5052,8 @@ const unsigned long SLEEP_TIMEOUT = {sleep_timeout_ms}UL;
 const unsigned long STATE_BLEND_TIME = {blend_time_ms}UL;
 // const unsigned long SEGMENT_DURATION = {segment_length_ms}UL;  // Now variable per segment
 const unsigned long SEGMENT_BLEND_TIME = {markov_blend_ms}UL;
+// Hold IDLE and ignore the sensor for this long after power-up (0 = disabled).
+const unsigned long STARTUP_LOCKOUT = {startup_lockout_ms}UL;
 const int MAX_STEP_PER_UPDATE = 2;  // Slew-rate limit for smoother transitions
 
 // Organic wobble
@@ -4302,7 +5090,7 @@ float phaseOffsets[NUM_SERVOS];
                 # Compact: one segment per line
                 code += "  {"
                 for sample_idx, sample in enumerate(seg['data']):
-                    vals = [str(int(max(0, min(180, sample[i])))) for i in range(8)]
+                    vals = [str(int(max(0, min(180, sample[i])))) for i in range(self.num_servos)]
                     code += "{" + ','.join(vals) + "}"
                     if sample_idx < len(seg['data']) - 1:
                         code += ","
@@ -4354,15 +5142,18 @@ Servo servos[NUM_SERVOS];
 
 // ==================== HELPER FUNCTIONS ====================
 int applyServoLimits(int position, int servoIdx) {
-  // Map 0-180 stored value to MIN_ANGLE-MAX_ANGLE output
-  int pos = map(position, 0, 180, SERVO_MIN, SERVO_MAX);
-  pos = constrain(pos, SERVO_MIN, SERVO_MAX);
-  
-  // Apply reversal WITHIN the output range (matches Python config)
+  // Degrees in, degrees out -- recorded values are already the degrees the UI
+  // was showing. Clamp to THIS channel's performed range, and mirror within
+  // that same range: a shared SERVO_MAX - pos only lands correctly when every
+  // channel starts at 0, and otherwise reads as the reversal not taking.
+  int lo = servoMin[servoIdx];
+  int hi = servoMax[servoIdx];
+  int pos = constrain(position, lo, hi);
+
   if (servoReversed[servoIdx]) {
-    pos = SERVO_MAX - pos;
+    pos = lo + hi - pos;
   }
-  return pos;
+  return constrain(pos, SERVO_MIN, SERVO_MAX);
 }
 
 float smootherstep(float t) {
@@ -4602,9 +5393,8 @@ void updateServos() {
 
 void setup() {
   Serial.begin(9600);
-  delay(100);  // Give serial time to initialize
   Serial.println("PIR Markov State Machine Starting...");
-
+  
   randomSeed(analogRead(0));
   pinMode(PIR_PIN, INPUT);
   
@@ -4631,14 +5421,23 @@ void setup() {
 unsigned long lastDebugTime = 0;
 
 void loop() {
+  // Startup lockout: hold IDLE and do not read the sensor at all until it
+  // expires, so a settling PIR cannot trigger or reset the sleep timer.
+  if (millis() < STARTUP_LOCKOUT) {
+    currentState = STATE_IDLE;
+    lastMotionTime = 0;
+    updateServos();
+    return;
+  }
+
   bool pirHigh = digitalRead(PIR_PIN) == HIGH;
   if (pirHigh) {
     triggerMotion();
   }
-  
+
   checkStateTransitions();
   updateServos();
-  
+
   // Debug output every 2 seconds
   if (millis() - lastDebugTime > 2000) {
     Serial.print("State:"); Serial.print(stateNames[currentState]);
@@ -4654,6 +5453,68 @@ void loop() {
         
         return code
 
+    # Bytes of PROGMEM the movement tables may occupy. An ATmega328 (Uno/Nano)
+    # has 32256 usable after the bootloader, and the state machine, servo
+    # library and serial code need their share. 18000 leaves roughly 12KB.
+    PIR_DATA_BUDGET_BYTES = 18000
+    PIR_MIN_SAMPLES = 24          # below this even a short take stutters
+    PIR_RECORD_RATE_HZ = 50.0     # what the UI captured at; never exceed it
+
+    def plan_pir_data(self, recordings):
+        """Decide which channels to store and how many samples each take gets.
+
+        Two things were wasting the budget. Every sample stored all ten
+        channels even when only six were ever recorded, so 40% of the table
+        was a constant. And every take got a flat 500 samples regardless of
+        length, so a 47s idle loop was sampled at 10.7Hz while a 23s take got
+        21.8Hz -- the longest take, the one running most of the time, came out
+        the coarsest.
+
+        Storing only recorded channels and then dividing the budget by
+        duration fixes both: every take lands at the SAME sample rate, and
+        that rate is as high as the remaining flash allows.
+
+        Returns (channels, {key: samples}, rate_hz).
+        """
+        used = set()
+        takes = []   # (key, duration)
+        for state_name, rec_list in (recordings or {}).items():
+            if not rec_list:
+                continue
+            for rec_idx, rec_data in enumerate(rec_list):
+                layers = rec_data.get('layers', []) or []
+                suffix = f"_{rec_idx}" if len(rec_list) > 1 else ""
+                duration = max((l.get('duration', 0) for l in layers), default=0)
+                takes.append((f"{state_name}{suffix}", max(float(duration), 0.001)))
+                for layer in layers:
+                    recorded = layer.get('recorded_servos') or {}
+                    for finger_idx in recorded.get('fingers', []):
+                        if 0 <= finger_idx < self.num_fingers:
+                            used.add(int(finger_idx))
+                    for arm_idx in recorded.get('arm', []):
+                        ch = self.num_fingers + int(arm_idx)
+                        if ch < self.num_servos:
+                            used.add(ch)
+
+        # No ownership metadata (older saves) means we cannot prove a channel
+        # is unused -- store all of them rather than silently dropping motion.
+        channels = sorted(used) if used else list(range(self.num_servos))
+
+        if not takes:
+            return channels, {}, 0.0
+
+        total_duration = sum(d for _, d in takes)
+        budget_samples = max(1, self.PIR_DATA_BUDGET_BYTES // max(1, len(channels)))
+        rate = budget_samples / total_duration
+        rate = min(rate, self.PIR_RECORD_RATE_HZ)   # no point inventing detail
+
+        allocation = {}
+        for key, duration in takes:
+            n = int(round(duration * rate))
+            n = max(self.PIR_MIN_SAMPLES, min(n, int(duration * self.PIR_RECORD_RATE_HZ) or 1))
+            allocation[key] = n
+        return channels, allocation, rate
+
     def _generate_state_movement_data(self, state_name, layers, min_angle, max_angle):
         """Generate the PROGMEM movement data arrays for a state."""
         
@@ -4662,18 +5523,27 @@ void loop() {
         if not layers:
             return f"\n// No data for {state_name} state\n"
         
-        # Find the duration and sample rate
+        # Sample count comes from plan_pir_data, which divides the flash budget
+        # by total duration so every take lands at the same rate. The old rule
+        # was a flat 500 per take regardless of length, which sampled a 47s
+        # loop at 10.7Hz and a 23s one at 21.8Hz -- the longest take, running
+        # most of the time, came out the coarsest.
         max_duration = max(layer['duration'] for layer in layers)
-        sample_interval = 0.02  # 50Hz sampling
-        num_samples = int(max_duration / sample_interval) + 1
-        
-        # Limit to reasonable size (max ~500 samples = 10 seconds at 50Hz)
-        if num_samples > 500:
-            sample_interval = max_duration / 500
-            num_samples = 500
-        
-        # Initialize position arrays
-        positions = [[90] * 8 for _ in range(num_samples)]
+        planned = getattr(self, '_pir_sample_plan', {}) or {}
+        num_samples = planned.get(state_name)
+        if not num_samples:
+            num_samples = min(500, int(max_duration / 0.02) + 1)
+        sample_interval = max_duration / num_samples if num_samples else 0.02
+
+        # Channels this state's layers never recorded hold the REST POSE, not a
+        # hardcoded 90. 90 is outside any range narrower than it, so on a 0-60
+        # rig every unrecorded channel baked as 90 and then saturated at 60 --
+        # the sketch drove them hard to the top of their travel while the UI,
+        # which simply never touches an unrecorded channel, left them at rest.
+        # Four channels sitting 20 degrees off is exactly the kind of "different
+        # somehow" that is hard to point at.
+        rest = [int(round(v)) for v in self.get_startup_pose()]
+        positions = [list(rest) for _ in range(num_samples)]
         
         # Debug: track if we found any actual data
         found_any_data = False
@@ -4717,25 +5587,31 @@ void loop() {
         else:
             print(f"  ❌ No actual movement data was extracted!")
         
-        # Generate the PROGMEM arrays
+        # Generate the PROGMEM arrays. Only the channels that were actually
+        # recorded are stored -- a constant column costs the same flash as a
+        # moving one, and on a Nano that flash is the thing limiting how finely
+        # the takes can be sampled.
+        channels = getattr(self, '_pir_active_channels', None) or list(range(self.num_servos))
         duration_ms = int(max_duration * 1000)
-        
-        code = f"\n// {state_name.upper()} state movement data ({num_samples} samples, {max_duration:.1f}s duration)\n"
+        rate = num_samples / max_duration if max_duration > 0 else 0.0
+
+        code = (f"\n// {state_name.upper()} movement data: {num_samples} samples over "
+                f"{max_duration:.1f}s = {rate:.1f}Hz, {len(channels)} channel(s) stored\n")
         code += f"const unsigned long {state_name}Duration = {duration_ms}UL;\n"
         code += f"const int {state_name}NumSamples = {num_samples};\n"
-        code += f"const uint8_t {state_name}Data[{num_samples}][NUM_SERVOS] PROGMEM = {{\n"
-        
+        code += f"const uint8_t {state_name}Data[{num_samples}][NUM_STORED_CH] PROGMEM = {{\n"
+
         for i, sample in enumerate(positions):
-            # Clamp values to 0-180 for uint8_t storage
-            clamped = [max(0, min(180, v)) for v in sample]
-            code += f"  {{{', '.join(map(str, clamped))}}}"
+            # uint8_t storage, so clamp to 0-180 as before
+            row = [max(0, min(180, int(sample[ch]))) for ch in channels]
+            code += f"  {{{', '.join(map(str, row))}}}"
             if i < num_samples - 1:
                 code += ","
-            if i % 10 == 9:  # Newline every 10 samples for readability
+            if i % 10 == 9:
                 code += "\n"
-        
+
         code += "\n};\n"
-        
+
         return code
     
     def _interpolate_layer_at_time(self, layer, t, debug_sample=False):
@@ -4784,7 +5660,7 @@ void loop() {
             factor = (t - prev_time) / (next_time - prev_time)
         
         # Get positions
-        result = [None] * 8
+        result = [None] * self.num_servos
         
         # Handle fingers (recording format uses 'finger_positions')
         prev_fingers = prev_frame.get('finger_positions', prev_frame.get('fingers', []))
@@ -4804,7 +5680,9 @@ void loop() {
         prev_arm = prev_frame.get('arm_positions', prev_frame.get('arm', []))
         next_arm = next_frame.get('arm_positions', next_frame.get('arm', []))
         if prev_arm and next_arm:
-            for i in range(min(3, len(prev_arm), len(next_arm))):
+            # was min(3, ...) from the 8-channel era, which silently dropped
+            # arm indices 3 and 4 -- channels S8 and S9 -- during export
+            for i in range(min(self.num_arm_servos, len(prev_arm), len(next_arm))):
                 prev_val = prev_arm[i]
                 next_val = next_arm[i]
                 if prev_val is not None and next_val is not None:
@@ -4833,6 +5711,11 @@ void loop() {
         code += "  unsigned long samplePos;\n"
         code += "  int fraction;\n"
         code += "  int recIdx;\n"
+        code += "  \n"
+        # Only stored channels get written below. positionsA/B are plain locals
+        # in updateServos, so anything left unwritten would be stack garbage
+        # blended straight into the servo output.
+        code += "  for (int i = 0; i < NUM_SERVOS; i++) positions[i] = REST_POSE[i];\n"
         code += "  \n"
         code += "  // Get the recording index for this slot\n"
         code += "  switch (state) {\n"
@@ -4864,10 +5747,12 @@ void loop() {
                 code += f"      if (sampleIdx >= numSamples) sampleIdx = numSamples - 1;\n"
                 code += f"      nextIdx = (sampleIdx + 1) % numSamples;\n"
                 code += f"      fraction = samplePos % 1000;\n"
-                code += f"      for (int i = 0; i < NUM_SERVOS; i++) {{\n"
-                code += f"        int curr = pgm_read_byte(&{state_name}Data[sampleIdx][i]);\n"
-                code += f"        int next = pgm_read_byte(&{state_name}Data[nextIdx][i]);\n"
-                code += f"        positions[i] = curr + ((next - curr) * fraction) / 1000;\n"
+                # Column k of the table is channel STORED_CH[k], not channel k
+                code += f"      for (int k = 0; k < NUM_STORED_CH; k++) {{\n"
+                code += f"        int ch = pgm_read_byte(&STORED_CH[k]);\n"
+                code += f"        int curr = pgm_read_byte(&{state_name}Data[sampleIdx][k]);\n"
+                code += f"        int next = pgm_read_byte(&{state_name}Data[nextIdx][k]);\n"
+                code += f"        positions[ch] = curr + ((next - curr) * fraction) / 1000;\n"
                 code += f"      }}\n"
             else:
                 # Multiple recordings - switch on recIdx
@@ -4883,10 +5768,11 @@ void loop() {
                     code += f"          if (sampleIdx >= numSamples) sampleIdx = numSamples - 1;\n"
                     code += f"          nextIdx = (sampleIdx + 1) % numSamples;\n"
                     code += f"          fraction = samplePos % 1000;\n"
-                    code += f"          for (int i = 0; i < NUM_SERVOS; i++) {{\n"
-                    code += f"            int curr = pgm_read_byte(&{state_name}{suffix}Data[sampleIdx][i]);\n"
-                    code += f"            int next = pgm_read_byte(&{state_name}{suffix}Data[nextIdx][i]);\n"
-                    code += f"            positions[i] = curr + ((next - curr) * fraction) / 1000;\n"
+                    code += f"          for (int k = 0; k < NUM_STORED_CH; k++) {{\n"
+                    code += f"            int ch = pgm_read_byte(&STORED_CH[k]);\n"
+                    code += f"            int curr = pgm_read_byte(&{state_name}{suffix}Data[sampleIdx][k]);\n"
+                    code += f"            int next = pgm_read_byte(&{state_name}{suffix}Data[nextIdx][k]);\n"
+                    code += f"            positions[ch] = curr + ((next - curr) * fraction) / 1000;\n"
                     code += f"          }}\n"
                     code += f"          break;\n"
                 # Default to first recording
@@ -4899,21 +5785,21 @@ void loop() {
                 code += f"          if (sampleIdx >= numSamples) sampleIdx = numSamples - 1;\n"
                 code += f"          nextIdx = (sampleIdx + 1) % numSamples;\n"
                 code += f"          fraction = samplePos % 1000;\n"
-                code += f"          for (int i = 0; i < NUM_SERVOS; i++) {{\n"
-                code += f"            int curr = pgm_read_byte(&{state_name}_0Data[sampleIdx][i]);\n"
-                code += f"            int next = pgm_read_byte(&{state_name}_0Data[nextIdx][i]);\n"
-                code += f"            positions[i] = curr + ((next - curr) * fraction) / 1000;\n"
+                code += f"          for (int k = 0; k < NUM_STORED_CH; k++) {{\n"
+                code += f"            int ch = pgm_read_byte(&STORED_CH[k]);\n"
+                code += f"            int curr = pgm_read_byte(&{state_name}_0Data[sampleIdx][k]);\n"
+                code += f"            int next = pgm_read_byte(&{state_name}_0Data[nextIdx][k]);\n"
+                code += f"            positions[ch] = curr + ((next - curr) * fraction) / 1000;\n"
                 code += f"          }}\n"
                 code += f"          break;\n"
                 code += f"      }}\n"
             
             code += f"      break;\n"
         
-        # Default case - return center positions
+        # No data for this state: hold the rest pose. This used to write a flat
+        # 90, which is outside any range narrower than it and so slammed every
+        # channel to its upper stop. positions[] is already seeded above.
         code += "    default:\n"
-        code += "      for (int i = 0; i < NUM_SERVOS; i++) {\n"
-        code += "        positions[i] = 90;\n"
-        code += "      }\n"
         code += "      break;\n"
         code += "  }\n"
         code += "}\n\n"
@@ -5045,6 +5931,21 @@ void loop() {
                 if arm_idx < self.num_arm_servos:
                     arm_owner[arm_idx] = layer_idx
         
+        # Channels the in-progress take is claiming are LEFT ALONE by playback.
+        #
+        # This is where overdubs turned to mush. Recording auto-starts playback
+        # of the existing layers, and record_current_state captures whatever is
+        # in finger_positions/arm_positions at that instant. So without this,
+        # the old layer was writing a channel at 40Hz from update_playback while
+        # the performer wrote the same channel from on_mouse_move at mouse-event
+        # rate -- and the new take recorded the interleaving of the two. The
+        # result read as jitter, but it was two sources fighting over one
+        # channel, not noise.
+        #
+        # Recency wins: whatever you are performing now owns the channel, both
+        # while recording it and afterwards (the owner map above is last-wins).
+        claimed = self.currently_claimed_channels() if self.layer_recording else set()
+
         # Apply positions ONLY from the owning layer for each servo
         for layer_idx, layer in enumerate(layers_to_play):
             duration = layer['duration']
@@ -5077,6 +5978,8 @@ void loop() {
             
             # Apply finger positions ONLY if this layer owns the servo
             for finger_idx in range(self.num_fingers):
+                if finger_idx in claimed:
+                    continue  # the take being recorded owns this channel now
                 if finger_owner[finger_idx] == layer_idx:
                     prev_fingers = prev_point.get('finger_positions', [])
                     next_fingers = next_point.get('finger_positions', [])
@@ -5095,6 +5998,8 @@ void loop() {
             
             # Apply arm positions ONLY if this layer owns the servo
             for arm_idx in range(self.num_arm_servos):
+                if (self.num_fingers + arm_idx) in claimed:
+                    continue  # the take being recorded owns this channel now
                 if arm_owner[arm_idx] == layer_idx:
                     prev_arm = prev_point.get('arm_positions', [])
                     next_arm = next_point.get('arm_positions', [])
@@ -5223,7 +6128,7 @@ void loop() {
         
         # Initialize phase offsets once (randomized per servo for variety)
         if not hasattr(self, '_organic_phases'):
-            self._organic_phases = [random.uniform(0, 2 * math.pi) for _ in range(8)]
+            self._organic_phases = [random.uniform(0, 2 * math.pi) for _ in range(self.num_servos)]
             self._organic_start_time = current_time
         
         # Time since organic mode started
@@ -5231,7 +6136,7 @@ void loop() {
         
         # Calculate smooth wobble for each servo using layered sine waves
         # Different frequencies create more organic, less mechanical movement
-        for i in range(8):
+        for i in range(self.num_servos):
             phase = self._organic_phases[i]
             
             # Layer 1: Slow breathing rhythm (0.15 Hz - ~7 second cycle)
@@ -5280,32 +6185,38 @@ void loop() {
                 self.stop_recording()
                 return
         
-        # Determine which servos to record based on control mode
+        # Only channels this take actually claims get written. Everything
+        # else stays None so the layer that performed it keeps ownership.
+        claimed = self.claimable_channels()
         if self.control_mode.get() == 'cursor':
-            # Cursor mode: only record ENABLED finger positions
+            # Cursor mode: record every channel the wave is driving, across
+            # both storage groups -- a wave-driven S7 must land in the take
+            # the same way a wave-driven S2 does.
             finger_positions = [None] * self.num_fingers
             arm_positions = [None] * self.num_arm_servos
-            # Only record fingers that have wave control enabled
-            for i in range(self.num_fingers):
-                if self.finger_wave_enabled[i].get():
+            for i in range(self.num_servos):
+                if i not in claimed:
+                    continue
+                if i < self.num_fingers:
                     finger_positions[i] = self.finger_positions[i]
                     self.recorded_servos['fingers'].add(i)
+                else:
+                    arm_idx = i - self.num_fingers
+                    arm_positions[arm_idx] = self.arm_positions[arm_idx]
+                    self.recorded_servos['arm'].add(arm_idx)
         else:
-            # Manual mode: only record the selected servo
+            # Manual mode: the selected servo, and only if it is armed
+            finger_positions = [None] * self.num_fingers
+            arm_positions = [None] * self.num_arm_servos
             selected = self.selected_servo.get()
-            if selected < self.num_fingers:
-                # Selected finger
-                finger_positions = [None] * self.num_fingers
-                finger_positions[selected] = self.finger_positions[selected]
-                arm_positions = [None] * self.num_arm_servos
-                self.recorded_servos['fingers'].add(selected)
-            else:
-                # Selected arm servo
-                finger_positions = [None] * self.num_fingers
-                arm_positions = [None] * self.num_arm_servos
-                arm_idx = selected - self.num_fingers
-                arm_positions[arm_idx] = self.arm_positions[arm_idx]
-                self.recorded_servos['arm'].add(arm_idx)
+            if selected in claimed:
+                if selected < self.num_fingers:
+                    finger_positions[selected] = self.finger_positions[selected]
+                    self.recorded_servos['fingers'].add(selected)
+                else:
+                    arm_idx = selected - self.num_fingers
+                    arm_positions[arm_idx] = self.arm_positions[arm_idx]
+                    self.recorded_servos['arm'].add(arm_idx)
         
         point = {
             'time': time.time() - self.layer_record_start_time,
@@ -5317,13 +6228,80 @@ void loop() {
         self.current_layer_data.append(point)
     
     def clear_layers(self):
-        """Clear all recorded layers."""
+        """Clear everything that can put movement on the servos.
+
+        This used to empty recorded_layers and nothing else, which is why old
+        movement kept coming back after a Clear All. Four other stores were
+        left live:
+
+          * current_layer_data -- an in-progress capture survived the clear, so
+            the next Stop committed a layer built from samples taken BEFORE it
+          * layer_recording / is_playing -- the transport kept running, and
+            recording carried on into the "cleared" session
+          * pir_cached_recordings -- with PIR enabled, update_playback reads the
+            library cache and never touches recorded_layers at all, so Clear All
+            did not even interrupt it
+          * recorded_servos -- a stale ownership set leaked into the next take
+
+        Anything that survives here is movement the user cannot see the source
+        of, so clear the lot."""
+        n_layers = len(self.recorded_layers)
+        n_cached = len(getattr(self, 'pir_cached_recordings', {}) or {})
+        was_busy = self.layer_recording or self.is_playing
+
+        if n_layers or n_cached or was_busy:
+            detail = [f"{n_layers} layer(s)"]
+            if n_cached:
+                detail.append(f"{n_cached} cached PIR recording(s)")
+            if self.layer_recording:
+                detail.append("the take being recorded right now")
+            if not tkinter.messagebox.askyesno(
+                    "Clear all?",
+                    "This discards:\n  - " + "\n  - ".join(detail)
+                    + "\n\nSaved files on disk are untouched.\n\nContinue?"):
+                return
+
+        # 1. stop the transport before touching what it is reading
+        self.layer_recording = False
+        self.is_playing = False
+        self.markov_mode = False
+        self.playback_layer = None
+        self.playback_index = 0
+        self.playback_position = 0.0
+
+        # 2. drop the in-progress capture
+        self.current_layer_data = []
+        self.recorded_servos = {'fingers': set(), 'arm': set()}
+
+        # 3. drop committed layers and keyframes
         self.recorded_layers = []
-        self.captured_keyframes = []  # Also clear keyframes
+        self.captured_keyframes = []
         self.keyframe_capture_start = None
-        self.loop_duration.set(0.0)  # Reset loop duration constraint
+        self.loop_duration.set(0.0)
+
+        # 4. drop the PIR library cache -- the other thing that drives servos
+        if hasattr(self, 'pir_cached_recordings'):
+            self.pir_cached_recordings = {}
+        self.pir_transition_positions = None
+        self.pir_is_crossfading = False
+
+        # 5. force the timeline to re-trace rather than trust its cache
+        self._timeline_sig = None
+
+        # 6. put the buttons back
+        self.record_btn.configure(text="🔴 Record", fg_color=self.default_button_color)
+        self.playback_btn.configure(text="▶️ Play", fg_color=self.default_button_color)
+        if hasattr(self, 'rec_indicator_bg'):
+            self.canvas.itemconfig(self.rec_indicator_bg, state='hidden')
+            self.canvas.itemconfig(self.rec_indicator_dot, state='hidden')
+            self.canvas.itemconfig(self.rec_indicator_text, state='hidden')
+
         self.update_layer_list()
-        print("🗑️ All layers and keyframes cleared - loop duration reset")
+        self.update_timeline()
+        self.sync_lane_transport()
+        self.on_rec_arm_changed()
+        print(f"🗑️ Cleared {n_layers} layer(s), {n_cached} cached PIR recording(s), "
+              f"in-progress capture, and stopped the transport")
     
     # ==================== Hardware Config Management ====================
     
@@ -5345,6 +6323,112 @@ void loop() {
             print(f"⚠️ Could not load hardware config: {e}")
         return False
     
+    # Pins the two channels added in the 8 -> 10 expansion default to.
+    # 3 was the old PIR input; PIR moved to 2 to free it.
+    DEFAULT_NEW_PINS = [4, 3]
+    LEGACY_PIR_PIN = 3
+
+    def migrate_hardware_config(self):
+        """Grow a saved 8-servo preset to 10 channels in place.
+
+        Presets on disk predate the extra two servos, so every per-channel
+        list comes back short. Pad rather than reject: a config written by
+        the old build must still open, just with two more channels parked at
+        safe defaults."""
+        config = self.hardware_config
+        total = self.num_servos
+
+        pins = list(config.get('pin_mapping') or [])
+        while len(pins) < total:
+            idx = len(pins)
+            # Only the two channels added by this expansion have a known
+            # default pin. Anything missing below that came from a malformed
+            # config; park it on 0 rather than indexing off the end.
+            new_slot = idx - 8
+            if 0 <= new_slot < len(self.DEFAULT_NEW_PINS):
+                pins.append(self.DEFAULT_NEW_PINS[new_slot])
+            else:
+                pins.append(0)
+        config['pin_mapping'] = pins[:total]
+
+        limits = [list(lim) for lim in (config.get('per_servo_limits') or [])]
+        while len(limits) < total:
+            limits.append([0, 180])
+        config['per_servo_limits'] = limits[:total]
+
+        names = list(config.get('servo_names') or [])
+        while len(names) < total:
+            names.append(f'S{len(names)}')
+        config['servo_names'] = names[:total]
+
+        # PIR must not sit on a pin a servo now drives. Falling back to a fixed
+        # D2 was only right while D2 happened to be free -- on a rig that moved
+        # a servo onto it, the "fix" landed the sensor on another taken pin. Go
+        # to the lowest genuinely free digital pin instead, and record the move
+        # so the caller can tell the user rather than only the console: the
+        # spinbox still reading D3 while the config says D2 is worse than the
+        # collision it was avoiding.
+        pir = config.get('pir_pin', 2)
+        self.pir_pin_moved = None
+        if pir in config['pin_mapping']:
+            free = next((p for p in range(2, 20) if p not in config['pin_mapping']), None)
+            if free is None:
+                print(f"⚠️ PIR pin D{pir} is driven by a servo and no digital pin is free")
+            else:
+                print(f"⚠️ PIR pin D{pir} is driven by a servo - moving PIR to D{free}")
+                self.pir_pin_moved = (pir, free)
+                pir = free
+        config['pir_pin'] = pir
+
+        config.setdefault('reversed_servos', [])
+        config['reversed_servos'] = [i for i in config['reversed_servos'] if i < total]
+
+        # Presets written before the expressive range and the hardware backstop
+        # were separated only have the one pair. Open the backstop to full scale
+        # rather than inheriting the old value: that value was the expressive
+        # range, and baking it in is exactly the coupling this split undoes.
+        config.setdefault('firmware_safe_min', 0)
+        config.setdefault('firmware_safe_max', 180)
+
+        # The backstop has to contain the expressive range or it silently
+        # truncates the top of every move -- and only a reflash would fix it,
+        # which is the confusing kind of failure. Widen to fit and say so.
+        self.safe_range_widened = None
+        lo_safe, hi_safe = config['firmware_safe_min'], config['firmware_safe_max']
+        lo_exp, hi_exp = config['global_min_angle'], config['global_max_angle']
+        if lo_exp < lo_safe or hi_exp > hi_safe:
+            new_lo, new_hi = min(lo_safe, lo_exp), max(hi_safe, hi_exp)
+            print(f"⚠️ Firmware backstop {lo_safe}-{hi_safe} is narrower than the "
+                  f"expressive range {lo_exp}-{hi_exp} - widening to {new_lo}-{new_hi}")
+            self.safe_range_widened = (lo_safe, hi_safe, new_lo, new_hi)
+            config['firmware_safe_min'], config['firmware_safe_max'] = new_lo, new_hi
+
+    def arm_contrib(self, name, default=1.0):
+        """Contribution weight for an arm channel, by label.
+
+        The scratch-pattern helpers were written against anatomy names that
+        no longer exist (and in the case of "Wrist Tilt"/"Wrist Rotate",
+        never did -- the dict was always keyed by arm_names). Missing keys
+        return a neutral 1.0 so those code paths degrade instead of raising."""
+        var = self.arm_contributions.get(name)
+        return var.get() if var is not None else default
+
+    def refresh_servo_labels(self):
+        """Rebuild the displayed channel labels from the pin map.
+
+        Derived on every call so a rewire (changing pin_mapping) renames the
+        channels immediately, instead of leaving a stale name saved in the
+        preset the way the old anatomy labels did."""
+        pins = self.hardware_config.get('pin_mapping') or []
+        labels = []
+        for i in range(self.num_servos):
+            pin = pins[i] if i < len(pins) else None
+            labels.append(f"S{i} (D{pin})" if pin is not None else f"S{i}")
+        self.all_servo_names = labels
+        self.finger_names = labels[:self.num_fingers]
+        self.arm_names = labels[self.num_fingers:]
+        return labels
+
     def save_hardware_config(self, filepath=None):
         """Save hardware configuration to JSON file."""
         if filepath is None:
@@ -5362,11 +6446,17 @@ void loop() {
     
     def apply_hardware_config(self):
         """Apply current hardware config to internal variables and reconnect if needed."""
+        # A config arriving from disk or the editor may still be 8 channels
+        # wide, and its pin map may have moved -- grow it and re-derive the
+        # labels before anything indexes by channel.
+        self.migrate_hardware_config()
+        self.refresh_servo_labels()
+
         # Update derived variables
         self.servo_limits = [tuple(lim) for lim in self.hardware_config['per_servo_limits']]
-        self.servo_reversed = [i in self.hardware_config['reversed_servos'] for i in range(8)]
+        self.servo_reversed = [i in self.hardware_config['reversed_servos'] for i in range(self.num_servos)]
         self.default_port = self.hardware_config['serial_port']
-
+        
         # Update UI elements if they exist
         if hasattr(self, 'config_name_var'):
             self.config_name_var.set(self.hardware_config['name'])
@@ -5374,18 +6464,22 @@ void loop() {
             self.config_min_var.set(self.hardware_config['global_min_angle'])
         if hasattr(self, 'config_max_var'):
             self.config_max_var.set(self.hardware_config['global_max_angle'])
+        # migrate_hardware_config may have widened these to contain the
+        # expressive range, so push the result back rather than the input
+        if hasattr(self, 'config_safe_min_var'):
+            self.config_safe_min_var.set(self.hardware_config.get('firmware_safe_min', 0))
+        if hasattr(self, 'config_safe_max_var'):
+            self.config_safe_max_var.set(self.hardware_config.get('firmware_safe_max', 180))
         if hasattr(self, 'config_port_var'):
             self.config_port_var.set(self.hardware_config['serial_port'])
-        if hasattr(self, 'config_pir_pin_var'):
-            self.config_pir_pin_var.set(self.hardware_config.get('pir_pin', 2))
         if hasattr(self, 'config_reversed_vars'):
             for i, var in enumerate(self.config_reversed_vars):
                 var.set(i in self.hardware_config['reversed_servos'])
-
+        
         # Update canvas display
         if hasattr(self, 'update_servo_display'):
             self.update_servo_display()
-
+        
         print(f"🔧 Applied hardware config: {self.hardware_config['name']}")
     
     def update_config_from_ui(self):
@@ -5396,17 +6490,72 @@ void loop() {
             self.hardware_config['global_min_angle'] = self.config_min_var.get()
         if hasattr(self, 'config_max_var'):
             self.hardware_config['global_max_angle'] = self.config_max_var.get()
+        if hasattr(self, 'config_safe_min_var'):
+            try:
+                self.hardware_config['firmware_safe_min'] = int(self.config_safe_min_var.get())
+            except (ValueError, tk.TclError):
+                pass
+        if hasattr(self, 'config_safe_max_var'):
+            try:
+                self.hardware_config['firmware_safe_max'] = int(self.config_safe_max_var.get())
+            except (ValueError, tk.TclError):
+                pass
         if hasattr(self, 'config_port_var'):
             self.hardware_config['serial_port'] = self.config_port_var.get()
-        if hasattr(self, 'config_pir_pin_var'):
-            self.hardware_config['pir_pin'] = self.config_pir_pin_var.get()
         if hasattr(self, 'config_reversed_vars'):
             self.hardware_config['reversed_servos'] = [
                 i for i, var in enumerate(self.config_reversed_vars) if var.get()
             ]
+        if hasattr(self, 'config_baud_var'):
+            try:
+                self.hardware_config['baud_rate'] = int(self.config_baud_var.get())
+            except (ValueError, tk.TclError):
+                pass  # mid-typing in the combobox; keep the last good value
+        if hasattr(self, 'config_pir_pin_var'):
+            try:
+                self.hardware_config['pir_pin'] = int(self.config_pir_pin_var.get())
+            except (ValueError, tk.TclError):
+                pass
+        if hasattr(self, 'config_pins_var'):
+            # Only accept a COMPLETE, well-formed map. A half-typed field
+            # would otherwise reshuffle every channel's pin mid-keystroke.
+            try:
+                parsed = [int(p) for p in self.config_pins_var.get().replace(' ', '').split(',') if p != '']
+                if len(parsed) == self.num_servos:
+                    self.hardware_config['pin_mapping'] = parsed
+            except ValueError:
+                pass
 
-        # Apply the changes
+        # Apply the changes (also re-derives labels and re-checks the PIR pin)
         self.apply_hardware_config()
+
+        # If the PIR pin collided with a servo pin it has just been moved. Push
+        # the corrected value back into the spinbox and say so -- otherwise the
+        # field goes on displaying a pin the sketch will never use.
+        widened = getattr(self, 'safe_range_widened', None)
+        if widened:
+            old_lo, old_hi, new_lo, new_hi = widened
+            self.safe_range_widened = None
+            tkinter.messagebox.showwarning(
+                "Safe Limit Widened",
+                f"The expressive range does not fit inside the firmware safe "
+                f"limit of {old_lo}-{old_hi}°, so the limit has been widened to "
+                f"{new_lo}-{new_hi}°.\n\n"
+                "The safe limit is compiled into the sketch, so regenerate the "
+                "listener and reflash for this to take effect. Until you do, "
+                f"the board still clamps at {old_lo}-{old_hi}°.")
+
+        moved = getattr(self, 'pir_pin_moved', None)
+        if moved and hasattr(self, 'config_pir_pin_var'):
+            old, new = moved
+            self.config_pir_pin_var.set(new)
+            self.pir_pin_moved = None
+            tkinter.messagebox.showwarning(
+                "PIR Pin Moved",
+                f"D{old} is driven by a servo in the current pin map, so the PIR "
+                f"sensor has been moved to D{new}.\n\n"
+                f"To keep the PIR on D{old}, first move that servo channel to a "
+                f"different pin, then set the PIR pin again.")
     
     def export_hardware_preset(self):
         """Export current hardware config to a named preset file."""
@@ -5549,12 +6698,17 @@ void loop() {
         try:
             self.hand_controller = HandExpressionController(
                 port=self.default_port, 
+                baudrate=self.hardware_config.get('baud_rate', 115200),
                 clean_output=True,
                 min_angle=self.hardware_config['global_min_angle'],
                 max_angle=self.hardware_config['global_max_angle']
             )
-            # Test the connection by sending a center command
-            self.hand_controller.set_hand_positions([90]*8)
+            # Adopt whatever the board came up holding, then echo it back. A
+            # reconnect is not a reason to move: [90]*n threw every channel to
+            # 90 degrees on a rig that may not reach anywhere near that.
+            self.sync_pose_from_board()
+            self.hand_controller.set_hand_positions(
+                list(self.finger_positions) + list(self.arm_positions))
             print(f"✅ Arduino reconnected on {self.default_port}")
             self.update_connection_status()
             tkinter.messagebox.showinfo("Connected", f"Arduino reconnected successfully on {self.default_port}!")
@@ -5732,66 +6886,290 @@ void loop() {
         # Update PIR state recording dropdowns
         self.update_pir_recording_combos()
     
-    def update_timeline(self):
-        """Update the timeline visualization."""
-        self.timeline_canvas.delete("all")
-        
-        width = self.timeline_canvas.winfo_width()
-        height = 30
-        
+    # Per-servo trace colours for the timeline waveforms, indexed by the
+    # global servo index (0-4 fingers, 5-7 arm). Chosen to stay legible
+    # against the white inset lanes of the Win98 palette.
+    WAVE_COLORS = ['#000080', '#008080', '#800080', '#808000',
+                   '#c05000', '#006000', '#a00040', '#405060']
+    # Tall enough that several autoscaled traces in one lane stay legible;
+    # at 26px they collapsed into a hairball.
+    LANE_HEIGHT = 46
+
+    def get_timeline_loop_duration(self):
+        """The loop length the timeline must measure against -- the same one
+        update_playback uses. These used to disagree whenever a fixed loop
+        duration was set, which slid the playhead off the samples it was
+        supposed to be pointing at."""
+        if not self.recorded_layers:
+            return 0.0
+        fixed = self.loop_duration.get()
+        if fixed > 0:
+            return float(fixed)
+        return max((layer.get('duration') or 0.0) for layer in self.recorded_layers)
+
+    def _timeline_signature(self):
+        """Cheap fingerprint of everything the CACHED traces are drawn FROM.
+        While this is unchanged the tick only moves the playhead, instead of
+        re-tracing every polyline at loop rate.
+
+        The in-progress take is deliberately NOT in here -- its length changes
+        every frame, so including it would invalidate the cache continuously.
+        It gets its own lane, redrawn on its own each tick."""
+        return (
+            self.timeline_canvas.winfo_width(),
+            round(self.get_timeline_loop_duration(), 3),
+            bool(self.layer_recording),
+            tuple(
+                (layer.get('name', ''),
+                 round(layer.get('duration') or 0.0, 3),
+                 len(layer.get('data') or []))
+                for layer in self.recorded_layers
+            ),
+        )
+
+    def draw_recording_lane(self):
+        """Trace the take being recorded RIGHT NOW, live.
+
+        Drawn separately from the cached lanes and re-traced every tick, since
+        it grows continuously. Decimated to one point per pixel, so the cost
+        stays flat however long the pass runs."""
+        canvas = self.timeline_canvas
+        canvas.delete('reclane')
+        if not self.layer_recording:
+            return
+
+        width = canvas.winfo_width()
         if width <= 1:
             return
-        
-        if not self.recorded_layers or not self.is_playing:
-            # Draw empty timeline
-            self.timeline_canvas.create_rectangle(0, 0, width, height, 
-                                                  fill=self.colors['bg_dark'], outline='')
-            self.timeline_canvas.create_text(width//2, height//2, 
-                                            text="⏸️ Not playing" if self.recorded_layers else "No layers",
-                                            fill=self.colors['text_dim'])
+
+        top = len(self.recorded_layers) * self.LANE_HEIGHT
+        bottom = top + self.LANE_HEIGHT - 2
+        canvas.create_rectangle(0, top, width, bottom, fill='#2a1520',
+                                outline=self.colors['accent_red'], tags='reclane')
+
+        data = self.current_layer_data
+        elapsed = max(0.001, time.time() - self.layer_record_start_time)
+        # scale to the loop if one is set, else to what has been captured
+        loop = self.loop_duration.get() or 0.0
+        span = loop if loop > 0 else elapsed
+
+        for ch in range(self.num_servos):
+            key, idx = (('finger_positions', ch) if ch < self.num_fingers
+                        else ('arm_positions', ch - self.num_fingers))
+            vals = [(p.get('time', 0.0), (p.get(key) or [None] * 5)[idx])
+                    for p in data
+                    if idx < len(p.get(key) or []) and (p.get(key) or [])[idx] is not None]
+            if len(vals) < 2:
+                continue
+            lo = min(v for _, v in vals)
+            hi = max(v for _, v in vals)
+            rng = hi - lo
+            step = max(1, len(vals) // max(1, width))
+            pts = []
+            for t, v in vals[::step]:
+                x = min(width - 1, max(0, (t / span) * width if span else 0))
+                y = ((top + bottom) / 2 if rng < 1e-6
+                     else bottom - 2 - ((v - lo) / rng) * (bottom - top - 4))
+                pts.extend((x, y))
+            if len(pts) >= 4:
+                canvas.create_line(*pts,
+                                   fill=self.WAVE_COLORS[ch % len(self.WAVE_COLORS)],
+                                   tags='reclane')
+
+        # write head, so you can see where in the loop you are
+        head_x = min(width - 1, (elapsed / span) * width if span else 0)
+        canvas.create_line(head_x, top, head_x, bottom,
+                           fill=self.colors['accent_red'], width=2, tags='reclane')
+        canvas.create_text(4, top + self.LANE_HEIGHT // 2,
+                           text=f"● REC  {elapsed:.1f}s / {len(data)} pts", anchor=tk.W,
+                           fill='#ff8080', font=('Arial', 7, 'bold'), tags='reclane')
+
+    def _layer_servo_indices(self, layer):
+        """Global servo indices this layer actually recorded, in order."""
+        recorded = layer.get('recorded_servos') or {}
+        indices = [i for i in sorted(recorded.get('fingers', []) or []) if i < self.num_fingers]
+        indices += [self.num_fingers + i
+                    for i in sorted(recorded.get('arm', []) or [])
+                    if i < self.num_arm_servos]
+        return indices
+
+    def _servo_samples(self, layer, servo_index):
+        """(time, angle) pairs for one servo, skipping frames where it wasn't
+        captured. Cursor mode writes None for disabled fingers, so a lane can
+        legitimately be sparse."""
+        if servo_index < self.num_fingers:
+            key, idx = 'finger_positions', servo_index
+        else:
+            key, idx = 'arm_positions', servo_index - self.num_fingers
+
+        out = []
+        for point in layer.get('data') or []:
+            values = point.get(key) or []
+            if idx < len(values) and values[idx] is not None:
+                out.append((point.get('time', 0.0), values[idx]))
+        return out
+
+    def redraw_timeline_waves(self):
+        """Trace each layer as its own lane: one polyline per servo the layer
+        actually recorded, each autoscaled to its own range. A layer that only
+        overdubbed the elbow draws one line, not eight -- the lane never
+        implies more was captured than was."""
+        canvas = self.timeline_canvas
+        canvas.delete('wave')
+
+        width = canvas.winfo_width()
+        if width <= 1:
             return
-        
-        # Calculate longest layer duration
-        max_duration = max(layer['duration'] for layer in self.recorded_layers)
-        elapsed = time.time() - self.playback_start_time
-        
-        # Normalize to 0.0-1.0
-        progress = (elapsed % max_duration) / max_duration if max_duration > 0 else 0
-        self.playback_position = progress
-        
-        # Draw background
-        self.timeline_canvas.create_rectangle(0, 0, width, height, 
-                                              fill=self.colors['bg_dark'], outline='')
-        
-        # Draw layers as bars
-        layer_height = height // max(len(self.recorded_layers), 1)
+
+        if not self.recorded_layers:
+            canvas.create_rectangle(0, 0, width, self.LANE_HEIGHT,
+                                    fill=self.colors['bg_dark'], outline='', tags='wave')
+            canvas.create_text(width // 2, self.LANE_HEIGHT // 2,
+                               text='No layers recorded', fill=self.colors['canvas_bg'],
+                               font=('Arial', 8), tags='wave')
+            return
+
+        loop_duration = self.get_timeline_loop_duration() or 1.0
+
         for i, layer in enumerate(self.recorded_layers):
-            y = i * layer_height
-            layer_width = (layer['duration'] / max_duration) * width
-            
-            # Layer bar
-            self.timeline_canvas.create_rectangle(0, y, layer_width, y + layer_height - 1,
-                                                  fill='#4CAF50', outline='#2E7D32')
-            
-            # Layer label
-            self.timeline_canvas.create_text(5, y + layer_height//2,
-                                            text=layer['name'], anchor=tk.W,
-                                            fill='white', font=('Arial', 7))
-        
-        # Draw playhead
+            top = i * self.LANE_HEIGHT
+            bottom = top + self.LANE_HEIGHT - 2
+
+            # Inset lane, Win98 style: white field, dark top/left shadow
+            canvas.create_rectangle(0, top, width, bottom,
+                                    fill=self.colors['canvas_bg'],
+                                    outline=self.colors['border'], tags='wave')
+
+            duration = layer.get('duration') or 0.0
+            for servo_index in self._layer_servo_indices(layer):
+                samples = self._servo_samples(layer, servo_index)
+                if len(samples) < 2:
+                    continue
+
+                values = [v for _, v in samples]
+                low, high = min(values), max(values)
+                span = high - low
+
+                # One sample per pixel at most -- takes run to thousands of
+                # frames and Tk chokes long before it draws them all
+                step = max(1, len(samples) // max(1, width))
+                points = []
+                for sample_time, value in samples[::step]:
+                    # Playback maps each layer proportionally across the whole
+                    # loop (see update_playback), so the trace must stretch the
+                    # same way or it won't sit under the playhead
+                    fraction = (sample_time / duration) if duration > 0 else 0.0
+                    x = min(width - 1, max(0, fraction * width))
+                    if span < 1e-6:
+                        y = (top + bottom) / 2
+                    else:
+                        y = bottom - 2 - ((value - low) / span) * (bottom - top - 4)
+                    points.extend((x, y))
+
+                if len(points) >= 4:
+                    canvas.create_line(*points,
+                                       fill=self.WAVE_COLORS[servo_index % len(self.WAVE_COLORS)],
+                                       tags='wave')
+
+            label = f"{layer.get('name', 'layer')}  ({duration:.1f}s)"
+            canvas.create_text(4, top + self.LANE_HEIGHT // 2, text=label, anchor=tk.W,
+                               fill=self.colors['text_dim'], font=('Arial', 7), tags='wave')
+
+    def update_timeline(self):
+        """Move the playhead, and re-trace the waveforms only when the takes
+        themselves changed."""
+        canvas = self.timeline_canvas
+        width = canvas.winfo_width()
+        if width <= 1:
+            return
+
+        signature = self._timeline_signature()
+        if signature != getattr(self, '_timeline_sig', None):
+            self._timeline_sig = signature
+            lanes = len(self.recorded_layers) + (1 if self.layer_recording else 0)
+            wanted_height = max(self.LANE_HEIGHT, lanes * self.LANE_HEIGHT)
+            if int(canvas['height']) != wanted_height:
+                canvas.config(height=wanted_height)
+            self.redraw_timeline_waves()
+
+        # live take: its own lane, re-traced every tick because it is growing
+        self.draw_recording_lane()
+
+        canvas.delete('playhead')
+        height = int(canvas['height'])
+        loop_duration = self.get_timeline_loop_duration()
+
+        if not self.recorded_layers or not self.is_playing or loop_duration <= 0:
+            return
+
+        elapsed = (time.time() - self.playback_start_time) % loop_duration
+        progress = elapsed / loop_duration
+        self.playback_position = progress
+
         playhead_x = progress * width
-        self.timeline_canvas.create_line(playhead_x, 0, playhead_x, height,
-                                        fill='#FF5722', width=2)
-        
-        # Time label
-        current_time = elapsed % max_duration
-        self.timeline_canvas.create_text(width - 5, height - 5,
-                                        text=f"{current_time:.1f}s / {max_duration:.1f}s",
-                                        anchor=tk.SE, fill=self.colors['text_main'],
-                                        font=('Arial', 8))
-    
+        canvas.create_line(playhead_x, 0, playhead_x, height,
+                           fill=self.colors['accent_red'], width=1, tags='playhead')
+        canvas.create_text(width - 4, height - 2,
+                           text=f"{elapsed:.1f}s / {loop_duration:.1f}s", anchor=tk.SE,
+                           fill=self.colors['text_main'], font=('Arial', 7), tags='playhead')
+
+    def set_all_rec_armed(self, on):
+        for v in self.rec_armed:
+            v.set(bool(on))
+        self.on_rec_arm_changed()
+
+    def on_rec_arm_changed(self):
+        """Show what the next take will actually take ownership of."""
+        claim = sorted(self.claimable_channels())
+        if not claim:
+            self.arm_hint_label.config(text="⚠ nothing armed - REC would capture nothing")
+            return
+        # channels an earlier layer already owns, which this take would take over
+        owned = {}
+        for idx, layer in enumerate(self.recorded_layers):
+            for ch in self._layer_servo_indices(layer):
+                owned[ch] = idx
+        stealing = [c for c in claim if c in owned]
+        text = "will own: " + ",".join(f"S{c}" for c in claim)
+        if stealing:
+            text += "   (overwrites " + ",".join(f"S{c}" for c in stealing) + ")"
+        self.arm_hint_label.config(text=text)
+
+    def sync_lane_transport(self):
+        """Keep the by-the-lanes transport in step with the toolbar pair.
+
+        Mirrored from live state rather than from the other buttons' text, so
+        the two can never disagree about what the transport is doing."""
+        if not hasattr(self, 'record_btn2'):
+            return
+        rec_on = bool(self.layer_recording)
+        play_on = bool(self.is_playing)
+        self.record_btn2.configure(
+            text="■ Stop" if rec_on else "● REC",
+            fg_color=self.colors['accent_red'] if rec_on else '#c0c0c0',
+            text_color='white' if rec_on else 'black')
+        self.playback_btn2.configure(
+            text="■ Stop" if play_on else "▶ Play",
+            fg_color=self.colors['accent_red'] if play_on else '#c0c0c0',
+            text_color='white' if play_on else 'black')
+
+        if rec_on:
+            claim = sorted(self.currently_claimed_channels())
+            msg = (f"recording lane {len(self.recorded_layers) + 1} -> "
+                   + (",".join(f"S{c}" for c in claim) if claim else "nothing armed!"))
+        elif play_on:
+            msg = f"playing {len(self.recorded_layers)} layer(s)"
+            if self.organic_enabled.get():
+                msg += "  + organic"
+        elif self.recorded_layers:
+            msg = f"{len(self.recorded_layers)} layer(s)"
+        else:
+            msg = "no layers yet - hit REC"
+        self.lane_status_label.config(text=msg)
+
     def update_recording_status(self):
         """Update recording status label."""
+        self.sync_lane_transport()
         if self.layer_recording:
             elapsed = time.time() - self.layer_record_start_time
             points = len(self.current_layer_data)
@@ -5823,9 +7201,13 @@ void loop() {
             return
         
         code = self.generate_arduino_code()
-        
-        # Save to file
-        filename = f"hand_movements_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.ino"
+
+        # Name it. This used to write hand_movements_<timestamp>.ino straight
+        # into the working directory without asking, which is how you end up
+        # with a folder full of sketches you cannot tell apart.
+        filename = self.resolve_export_filename("hand_movements")
+        if not filename:
+            return
         filepath = os.path.join(os.getcwd(), filename)
         
         try:
@@ -5861,19 +7243,19 @@ void loop() {
             max_duration = max(layer['duration'] for layer in self.recorded_layers) if self.recorded_layers else 0
         
         # LAYER PRIORITY: Determine which layer "owns" each servo (LAST layer wins)
-        servo_owner = [-1] * 8  # layer index that owns each servo (-1 = none)
+        servo_owner = [-1] * self.num_servos  # layer index that owns each servo (-1 = none)
         for layer_idx, layer in enumerate(self.recorded_layers):
             recorded_servos = layer.get('recorded_servos', {'fingers': set(), 'arm': set()})
             for finger_idx in recorded_servos.get('fingers', []):
                 if finger_idx < 5:
                     servo_owner[finger_idx] = layer_idx
             for arm_idx in recorded_servos.get('arm', []):
-                if arm_idx < 3:
+                if arm_idx < self.num_arm_servos:
                     servo_owner[5 + arm_idx] = layer_idx
         
         # Build startup pose from first recorded value for each servo owner.
         # This avoids the awkward hardcoded 90deg boot pose.
-        startup_positions = [90] * 8
+        startup_positions = [90] * self.num_servos
 
         # Sort each layer timeline once.
         sorted_layer_movements = []
@@ -5922,13 +7304,42 @@ void loop() {
         for layer, keyframes in zip(self.recorded_layers, working_layer_frames):
             
             # TIME NORMALIZE: Scale layer duration to match global loop duration
-            # This ensures layers recorded at different durations sync properly
-            layer_duration = layer['duration']
-            if layer_duration > 0 and max_duration > 0:
-                time_scale = max_duration / layer_duration
-                # Scale all keyframe timestamps
-                for kf in keyframes:
-                    kf['time'] = kf['time'] * time_scale
+            # This ensures layers recorded at different durations sync properly.
+            #
+            # Playback speed MUST be divided out here as well. The generated
+            # sketch compares raw millis() against these timestamps, so if the
+            # speed only shrank loopDuration (as it used to) the keyframes were
+            # left on the unscaled timebase and every loop reset partway
+            # through -- at 1.3x, the last 23% of every layer was amputated
+            # mid-gesture. Both must land on the same adjusted timebase.
+            #
+            # Copy first: on the compressed path _extract_keyframes appends
+            # the ORIGINAL frame dicts, not copies, so scaling in place
+            # rewrote the live recording. Exporting twice compounded the
+            # scale factor, and everything downstream -- UI playback, the
+            # timeline waveforms -- read the mangled timestamps afterwards.
+            keyframes = [dict(kf) for kf in keyframes]
+
+            # Stretch onto the loop using the span the keyframes ACTUALLY
+            # cover, not the nominal recorded duration. On clean data the two
+            # agree to within 0.1% so this changes nothing -- but they drift
+            # apart whenever a layer's timestamps have been rescaled without
+            # its duration following (which the in-place-scaling bug above
+            # used to do on every export). Normalizing by a stale duration
+            # left such layers ending early, and the sketch then froze them,
+            # unblended, until the loop reset: a pause, then a snap.
+            # The span is authoritative; the duration is not.
+            if keyframes and max_duration > 0 and playback_speed > 0:
+                first_time = keyframes[0]['time']
+                span = keyframes[-1]['time'] - first_time
+                target = max_duration / playback_speed
+                if span > 0:
+                    for kf in keyframes:
+                        kf['time'] = (kf['time'] - first_time) / span * target
+                else:
+                    # single keyframe, or all stamped identically
+                    for kf in keyframes:
+                        kf['time'] = 0.0
             
             all_layer_keyframes.append({
                 'name': layer['name'],
@@ -5942,7 +7353,7 @@ void loop() {
             print(f"[EXPORT] Nano-safe compression enabled: {full_total_frames} -> {final_total} frames")
 
         # Resolve startup position from the first keyframe of each owning layer.
-        for servo_idx in range(8):
+        for servo_idx in range(self.num_servos):
             owner = servo_owner[servo_idx]
             if owner < 0 or owner >= len(all_layer_keyframes):
                 continue
@@ -5963,21 +7374,31 @@ void loop() {
         # Build ownership comment
         ownership_info = []
         servo_names = self.finger_names + self.arm_names
-        for servo_idx in range(8):
+        for servo_idx in range(self.num_servos):
             owner = servo_owner[servo_idx]
             if owner >= 0:
                 ownership_info.append(f" * Servo {servo_idx} ({servo_names[servo_idx]}): Layer {owner + 1}")
         
+        # Organic values for the sketch. The toggle is the single source of
+        # truth: off means a literal 0.0 in the generated constants, so the
+        # exported sketch replays exactly what the preview replayed.
+        organic_on = bool(self.organic_enabled.get())
+        organic_wobble = f"{float(self.position_wobble.get()):.2f}" if organic_on else "0.0"
+        organic_jitter = f"{float(self.timing_jitter.get()) / 100.0:.3f}" if organic_on else "0.0"
+
         # Get config values for export
-        min_angle = self.hardware_config['global_min_angle']
-        max_angle = self.hardware_config['global_max_angle']
+        # Backstop only. The clamp the piece was performed with is per
+        # channel, and a standalone sketch has no host to apply it.
+        eff_min_str, eff_max_str = self.effective_limits_c_arrays()
+        min_angle = self.hardware_config.get('firmware_safe_min', 0)
+        max_angle = self.hardware_config.get('firmware_safe_max', 180)
         reversed_servos = self.hardware_config['reversed_servos']
         pin_mapping = self.hardware_config['pin_mapping']
         
         # Build reversed servo condition for C code
         if reversed_servos:
             reversed_check = ' || '.join([f'index == {i}' for i in reversed_servos])
-            reversed_names = ', '.join([self.all_servo_names[i] for i in reversed_servos if i < 8])
+            reversed_names = ', '.join([self.all_servo_names[i] for i in reversed_servos if i < self.num_servos])
         else:
             reversed_check = '0'  # Never true
             reversed_names = 'none'
@@ -5985,9 +7406,13 @@ void loop() {
         # Build pin mapping string
         pin_str = ', '.join([str(p) for p in pin_mapping])
         startup_positions_str = ', '.join(str(p) for p in startup_positions)
-        
+        # Channel -> pin comment, derived from the config rather than the old
+        # hardcoded 8-line anatomy list, which silently dropped S8/S9.
+        pin_map_comment = '\n'.join(
+            f" * S{i} -> D{pin_mapping[i]}" for i in range(min(self.num_servos, len(pin_mapping))))
+
         code = f'''/*
- * 8-Servo Hand Control - Generated Movement Code (SIMULTANEOUS PLAYBACK)
+ * {self.num_servos}-Servo Hand Control - Generated Movement Code (SIMULTANEOUS PLAYBACK)
  * Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
  * Hardware Config: {self.hardware_config['name']}
  * Layers: {len(self.recorded_layers)}
@@ -5998,39 +7423,64 @@ void loop() {
  * Layer Priority (later layers override earlier for same servo):
 {chr(10).join(ownership_info)}
  * 
- * Hardware: 5 Finger Servos + 3 Arm Servos
- * Fingers: {', '.join(self.finger_names)}
- * Arm: {', '.join(self.arm_names)}
- * 
- * Pin Mapping:
- * Pin {pin_mapping[0]} -> Thumb (servo 0)
- * Pin {pin_mapping[1]} -> Index (servo 1)
- * Pin {pin_mapping[2]} -> Middle (servo 2)
- * Pin {pin_mapping[3]} -> Ring (servo 3)
- * Pin {pin_mapping[4]} -> Pinky (servo 4)
- * Pin {pin_mapping[5]} -> Shoulder (servo 5)
- * Pin {pin_mapping[6]} -> Elbow (servo 6)
- * Pin {pin_mapping[7]} -> Wrist (servo 7)
- * 
+ * Hardware: {self.num_fingers} group-A channels + {self.num_arm_servos} group-B channels
+ * Group A: {', '.join(self.finger_names)}
+ * Group B: {', '.join(self.arm_names)}
+ *
+ * Channel -> pin mapping:
+{pin_map_comment}
+ *
  * Stored positions already constrained during recording
  */
 
 #include <Servo.h>
 
 // Servo objects
-Servo servo[8];
-int servoPins[8] = {{{pin_str}}};
+Servo servo[{self.num_servos}];
+int servoPins[{self.num_servos}] = {{{pin_str}}};
 
 // Range configuration (from hardware preset: {self.hardware_config['name']})
 const int MIN_ANGLE = {min_angle};
 const int MAX_ANGLE = {max_angle};
+// Per-channel performed range (per-servo limit ∩ expressive range). No host
+// here to apply it, so it is compiled in.
+const int servoMin[{self.num_servos}] = {{{eff_min_str}}};
+const int servoMax[{self.num_servos}] = {{{eff_max_str}}};
 
-// Helper: Map 0-180 to MIN-MAX, reverse specified servos
+// ---- Organic variation ----------------------------------------------------
+// Mirrors the Organic panel in the UI, so the sketch breathes the same way the
+// preview did. 0 values = exact replay of the recorded take.
+// (Pause Chance is a live-preview control only and is not exported.)
+const float WOBBLE_AMOUNT = {organic_wobble};   // degrees of drift per channel
+const float TIMING_JITTER = {organic_jitter};   // fraction, e.g. 0.08 = +/-8% tempo
+float phaseOffset[{self.num_servos}];
+float jitterMul = 1.0;
+float jitterTarget = 1.0;
+unsigned long lastJitterUpdate = 0;
+unsigned long organicClock = 0;   // jitter-warped playback clock
+unsigned long lastTickMs = 0;
+
+// Layered slow sines rather than random jumps -- random per-frame offsets read
+// as twitch on a servo, not as life.
+int applyWobble(int index, int pos) {{
+  if (WOBBLE_AMOUNT <= 0.0) return pos;
+  float t = millis() / 1000.0;
+  float breath = sin(t * 0.7 + phaseOffset[index]);
+  float drift  = sin(t * 0.23 + phaseOffset[index] * 1.7) * 0.6;
+  float tremor = sin(t * 2.9 + phaseOffset[index] * 0.4) * 0.15;
+  return pos + (int)((breath + drift + tremor) * WOBBLE_AMOUNT * 0.5);
+}}
+
+// Helper: clamp to the rig's range and reverse the specified channels.
+// Recorded positions are already degrees, so nothing is rescaled here -- doing
+// so replayed every take smaller than it was performed.
 void writeServo(int index, int pos) {{
-  pos = map(pos, 0, 180, MIN_ANGLE, MAX_ANGLE);
-  pos = constrain(pos, MIN_ANGLE, MAX_ANGLE);
-  if({reversed_check}) pos = MAX_ANGLE - pos;  // Reverse {reversed_names}
-  servo[index].write(pos);
+  pos = applyWobble(index, pos);
+  pos = constrain(pos, servoMin[index], servoMax[index]);
+  // Mirror within THIS channel's range -- a shared MAX_ANGLE - pos only lands
+  // correctly when every channel starts at 0.
+  if({reversed_check}) pos = servoMin[index] + servoMax[index] - pos;  // Reverse {reversed_names}
+  servo[index].write(constrain(pos, MIN_ANGLE, MAX_ANGLE));
 }}
 
 // Timing
@@ -6038,7 +7488,7 @@ unsigned long loopStartTime;
 unsigned long loopDuration = {int(adjusted_duration * 1000)}; // milliseconds (adjusted for {playback_speed:.1f}x speed)
 
 // Startup pose (matches first recorded frame per owned servo)
-const int startupPositions[8] = {{{startup_positions_str}}};
+const int startupPositions[{self.num_servos}] = {{{startup_positions_str}}};
 
 // Layer data structures
 '''
@@ -6048,7 +7498,7 @@ const int startupPositions[8] = {{{startup_positions_str}}};
             keyframes = layer_data['keyframes']
             
             # Find which servos this layer OWNS
-            layer_owned_servos = [s for s in range(8) if servo_owner[s] == i]
+            layer_owned_servos = [s for s in range(self.num_servos) if servo_owner[s] == i]
             
             # Skip layers that don't own any servos (no need to generate data)
             if not layer_owned_servos:
@@ -6058,8 +7508,13 @@ const int startupPositions[8] = {{{startup_positions_str}}};
             code += f"\n// Layer {i+1}: {layer_data['name']} ({layer_data['mode']} mode) - {len(keyframes)} keyframes\n"
             code += f"const int layer{i+1}_count = {len(keyframes)};\n"
             code += f"const unsigned long layer{i+1}_times[] PROGMEM = {{"
-            # Adjust keyframe times by playback speed
-            code += ', '.join([str(int((kf['time'] / playback_speed) * 1000)) for kf in keyframes])
+            # Seconds -> ms only. Playback speed is ALREADY folded into these
+            # timestamps by the normalization above, which stretches every
+            # layer onto max_duration/playback_speed. Dividing again here (as
+            # this line used to) applied the speed twice and left the whole
+            # sequence finishing at loopDuration/speed -- the dead air and
+            # snap at the end of every loop.
+            code += ', '.join([str(int(kf['time'] * 1000)) for kf in keyframes])
             code += "};\n"
             
             # Generate position arrays ONLY for servos this layer OWNS
@@ -6091,25 +7546,53 @@ const int startupPositions[8] = {{{startup_positions_str}}};
             code += f"int layer{i+1}_index = 0;\n"
         
         # Setup function
-        code += '''
-void setup() {
-  Serial.begin(9600);
-  delay(100);  // Give serial time to initialize
+        code += f'''
+void setup() {{
+  Serial.begin({self.hardware_config.get('baud_rate', 115200)});
 
   // Attach servos
-  for(int i = 0; i < 8; i++) {
+  for(int i = 0; i < {self.num_servos}; i++) {{
     servo[i].attach(servoPins[i]);
         writeServo(i, startupPositions[i]);
-  }
-  
-  delay(1000);
-  Serial.println("8-Servo Hand Control Ready - Simultaneous Playback");
-  loopStartTime = millis();
-}
+  }}
 
+  // Spread the wobble phases so channels never breathe in lockstep
+  randomSeed(analogRead(A0));
+  for (int i = 0; i < {self.num_servos}; i++) {{
+    phaseOffset[i] = random(0, 628) / 100.0;   // 0..2pi
+  }}
+
+  delay(1000);
+  Serial.println("{self.num_servos}-Servo Hand Control Ready - Simultaneous Playback");
+  loopStartTime = millis();
+  lastTickMs = millis();
+}}
+'''
+
+        # plain literal from here: this block has no interpolation, so the C
+        # braces stay single rather than being doubled for an f-string
+        code += '''
 void loop() {
-  unsigned long elapsed = millis() - loopStartTime;
-  
+  // Timing jitter: drift the playback clock slowly around 1.0x instead of
+  // stepping it, so the tempo breathes rather than stutters. With
+  // TIMING_JITTER = 0 this is exactly millis() - loopStartTime.
+  unsigned long nowMs = millis();
+  unsigned long deltaMs = nowMs - lastTickMs;
+  lastTickMs = nowMs;
+
+  if (TIMING_JITTER > 0.0) {
+    if (nowMs - lastJitterUpdate > 1500) {
+      jitterTarget = 1.0 + (random(-1000, 1000) / 1000.0) * TIMING_JITTER;
+      lastJitterUpdate = nowMs;
+    }
+    jitterMul += (jitterTarget - jitterMul) * 0.02;   // ease, never jump
+  } else {
+    jitterMul = 1.0;
+  }
+
+  organicClock += (unsigned long)(deltaMs * jitterMul);
+  unsigned long elapsed = organicClock;
+
   // Smooth loop blending - last 10% of loop blends back to start
   unsigned long blendZone = loopDuration / 10;  // 10% blend zone
   bool isBlending = elapsed >= (loopDuration - blendZone);
@@ -6123,13 +7606,14 @@ void loop() {
   // Loop the sequence
   if(elapsed >= loopDuration) {
     loopStartTime = millis();
+    organicClock = 0;   // the jitter-warped clock is the one being compared
     elapsed = 0;
 '''
         
         # Reset layer indices - ONLY for layers that OWN servos (others don't have index vars)
         for i in range(len(all_layer_keyframes)):
             # Check if this layer owns any servos
-            layer_owned_servos = [s for s in range(8) if servo_owner[s] == i]
+            layer_owned_servos = [s for s in range(self.num_servos) if servo_owner[s] == i]
             if layer_owned_servos:
                 code += f"    layer{i+1}_index = 0;\n"
         
@@ -6141,7 +7625,7 @@ void loop() {
             
             # Only include servos that this layer OWNS (last layer to record wins)
             owned_servos = []
-            for servo_idx in range(8):
+            for servo_idx in range(self.num_servos):
                 # Check if this layer owns this servo
                 if servo_owner[servo_idx] != i:
                     continue
@@ -6163,45 +7647,46 @@ void loop() {
                 continue
             
             code += f'''  // Update layer {i+1} with interpolation (OWNS: {', '.join([self.finger_names[s] if s < 5 else self.arm_names[s-5] for s in owned_servos])})
-  if(layer{i+1}_index < layer{i+1}_count - 1) {{
-    unsigned long currentTime = pgm_read_dword(&layer{i+1}_times[layer{i+1}_index]);
-    unsigned long nextTime = pgm_read_dword(&layer{i+1}_times[layer{i+1}_index + 1]);
-    
-    // Move to next keyframe if we've passed it
-    if(elapsed >= nextTime) {{
+  {{
+    // Catch up in a while loop: one index per pass could fall behind
+    // whenever keyframes land closer together than the loop period.
+    while(layer{i+1}_index < layer{i+1}_count - 1 &&
+          elapsed >= pgm_read_dword(&layer{i+1}_times[layer{i+1}_index + 1])) {{
       layer{i+1}_index++;
     }}
-    
-    // Interpolate between current and next keyframe
-    if(layer{i+1}_index < layer{i+1}_count - 1 && elapsed >= currentTime) {{
-      currentTime = pgm_read_dword(&layer{i+1}_times[layer{i+1}_index]);
-      nextTime = pgm_read_dword(&layer{i+1}_times[layer{i+1}_index + 1]);
-      
-      // Calculate interpolation factor (0.0 to 1.0)
-      float factor = (float)(elapsed - currentTime) / (float)(nextTime - currentTime);
-      factor = constrain(factor, 0.0, 1.0);
-      
+
+    // A layer that has run out of keyframes HOLDS its final pose and keeps
+    // blending. The old guard skipped the whole block once the index hit the
+    // end, so such a layer froze with no blend and then snapped back at the
+    // loop reset.
+    bool atEnd = (layer{i+1}_index >= layer{i+1}_count - 1);
+    float factor = 0.0;
+    if(!atEnd) {{
+      unsigned long currentTime = pgm_read_dword(&layer{i+1}_times[layer{i+1}_index]);
+      unsigned long nextTime = pgm_read_dword(&layer{i+1}_times[layer{i+1}_index + 1]);
+      if(nextTime > currentTime && elapsed >= currentTime) {{
+        factor = (float)(elapsed - currentTime) / (float)(nextTime - currentTime);
+        factor = constrain(factor, 0.0, 1.0);
+      }}
+    }}
+    {{
 '''
             for servo_idx in owned_servos:
                 servo_name = self.finger_names[servo_idx] if servo_idx < 5 else self.arm_names[servo_idx - 5]
                 code += f"      // Interpolate {servo_name}\n"
                 code += f"      int curr{servo_idx} = pgm_read_word(&layer{i+1}_servo{servo_idx}[layer{i+1}_index]);\n"
-                code += f"      int next{servo_idx} = pgm_read_word(&layer{i+1}_servo{servo_idx}[layer{i+1}_index + 1]);\n"
+                code += f"      // reading [index + 1] past the end would run off the array\n"
+                code += f"      int next{servo_idx} = atEnd ? curr{servo_idx}\n"
+                code += f"                  : (int)pgm_read_word(&layer{i+1}_servo{servo_idx}[layer{i+1}_index + 1]);\n"
                 code += f"      int start{servo_idx} = pgm_read_word(&layer{i+1}_servo{servo_idx}[0]);\n"
                 code += f"      \n"
-                code += f"      if(curr{servo_idx} != -1 && next{servo_idx} != -1) {{\n"
-                code += f"        int interpolated = curr{servo_idx} + (int)((next{servo_idx} - curr{servo_idx}) * factor);\n"
+                code += f"      if(curr{servo_idx} != -1) {{\n"
+                code += f"        int pos = (next{servo_idx} != -1)\n"
+                code += f"                ? curr{servo_idx} + (int)((next{servo_idx} - curr{servo_idx}) * factor)\n"
+                code += f"                : curr{servo_idx};\n"
                 code += f"        \n"
-                code += f"        // Apply blend zone for smooth looping\n"
-                code += f"        if(isBlending && start{servo_idx} != -1) {{\n"
-                code += f"          interpolated = interpolated * (1.0 - blendFactor) + start{servo_idx} * blendFactor;\n"
-                code += f"        }}\n"
-                code += f"        \n"
-                code += f"        writeServo({servo_idx}, interpolated);\n"
-                code += f"      }} else if(curr{servo_idx} != -1) {{\n"
-                code += f"        int pos = curr{servo_idx};\n"
-                code += f"        \n"
-                code += f"        // Apply blend zone for smooth looping\n"
+                code += f"        // Apply blend zone for smooth looping -- runs even once this\n"
+                code += f"        // layer is out of keyframes, so it eases home instead of snapping\n"
                 code += f"        if(isBlending && start{servo_idx} != -1) {{\n"
                 code += f"          pos = pos * (1.0 - blendFactor) + start{servo_idx} * blendFactor;\n"
                 code += f"        }}\n"
@@ -6239,8 +7724,9 @@ void loop() {
         pir_enable = tk.BooleanVar(value=True)
         tk.Checkbutton(pir_frame, variable=pir_enable, bg=self.colors['bg_frame']).grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
         
-        tk.Label(pir_frame, text="PIR Pin:", bg=self.colors['bg_frame'],
+        tk.Label(pir_frame, text="PIR Pin:", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_main']).grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        # default from the saved config, not a literal -- 3 now drives S9
         pir_pin = tk.IntVar(value=self.hardware_config.get('pir_pin', 2))
         tk.Spinbox(pir_frame, from_=2, to=13, textvariable=pir_pin, width=10).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
         
@@ -6350,20 +7836,20 @@ void loop() {
 
         # Startup pose for Markov export: match first phrase's first recorded pose
         # (per servo ownership, last layer wins) instead of forcing center 90deg.
-        startup_positions = [90] * 8
+        startup_positions = [90] * self.num_servos
         if phrases:
             first_phrase_layers = phrases[0].get('layers', [])
-            startup_owner = [-1] * 8
+            startup_owner = [-1] * self.num_servos
             for layer_idx, layer in enumerate(first_phrase_layers):
                 recorded_servos = layer.get('recorded_servos', {'fingers': set(), 'arm': set()})
                 for finger_idx in recorded_servos.get('fingers', []):
                     if finger_idx < 5:
                         startup_owner[finger_idx] = layer_idx
                 for arm_idx in recorded_servos.get('arm', []):
-                    if arm_idx < 3:
+                    if arm_idx < self.num_arm_servos:
                         startup_owner[5 + arm_idx] = layer_idx
 
-            for servo_idx in range(8):
+            for servo_idx in range(self.num_servos):
                 owner = startup_owner[servo_idx]
                 if owner < 0 or owner >= len(first_phrase_layers):
                     continue
@@ -6381,15 +7867,18 @@ void loop() {
         # In the future, this could analyze temporal patterns to build smarter transitions
         
         # Get config values for export
-        min_angle = self.hardware_config['global_min_angle']
-        max_angle = self.hardware_config['global_max_angle']
+        # Backstop only. The clamp the piece was performed with is per
+        # channel, and a standalone sketch has no host to apply it.
+        eff_min_str, eff_max_str = self.effective_limits_c_arrays()
+        min_angle = self.hardware_config.get('firmware_safe_min', 0)
+        max_angle = self.hardware_config.get('firmware_safe_max', 180)
         reversed_servos = self.hardware_config['reversed_servos']
         pin_mapping = self.hardware_config['pin_mapping']
         
         # Build reversed servo condition for C code
         if reversed_servos:
             reversed_check = ' || '.join([f'index == {i}' for i in reversed_servos])
-            reversed_names = ', '.join([self.all_servo_names[i] for i in reversed_servos if i < 8])
+            reversed_names = ', '.join([self.all_servo_names[i] for i in reversed_servos if i < self.num_servos])
         else:
             reversed_check = '0'
             reversed_names = 'none'
@@ -6397,9 +7886,11 @@ void loop() {
         # Build pin mapping string
         pin_str = ', '.join([str(p) for p in pin_mapping])
         startup_positions_str = ', '.join(str(p) for p in startup_positions)
-        
+        pin_map_comment = '\n'.join(
+            f" * S{i} -> D{pin_mapping[i]}" for i in range(min(self.num_servos, len(pin_mapping))))
+
         code = f'''/*
- * 8-Servo Hand Control - Markov Chain Phrase System
+ * {self.num_servos}-Servo Hand Control - Markov Chain Phrase System
  * Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
  * Hardware Config: {self.hardware_config['name']}
  * Phrases: {num_phrases}
@@ -6408,39 +7899,38 @@ void loop() {
  * This sketch uses Markov chains to randomly transition between
  * recorded movement phrases, creating organic, non-repetitive behavior.
  * 
- * Hardware: 5 Finger Servos + 3 Arm Servos
- * Pin Mapping:
- * Pin {pin_mapping[0]} -> Thumb (servo 0)
- * Pin {pin_mapping[1]} -> Index (servo 1)
- * Pin {pin_mapping[2]} -> Middle (servo 2)
- * Pin {pin_mapping[3]} -> Ring (servo 3)
- * Pin {pin_mapping[4]} -> Pinky (servo 4)
- * Pin {pin_mapping[5]} -> Shoulder (servo 5)
- * Pin {pin_mapping[6]} -> Elbow (servo 6)
- * Pin {pin_mapping[7]} -> Wrist (servo 7)
- * 
+ * Hardware: {self.num_fingers} group-A channels + {self.num_arm_servos} group-B channels
+ *
+ * Channel -> pin mapping:
+{pin_map_comment}
+ *
  * Stored positions already constrained during recording
  */
 
 #include <Servo.h>
 
 // Servo objects
-Servo servo[8];
-int servoPins[8] = {{{pin_str}}};
+Servo servo[{self.num_servos}];
+int servoPins[{self.num_servos}] = {{{pin_str}}};
 
 // Startup pose (matches first phrase's first recorded frame)
-const int startupPositions[8] = {{{startup_positions_str}}};
+const int startupPositions[{self.num_servos}] = {{{startup_positions_str}}};
 
 // Range configuration (from hardware preset: {self.hardware_config['name']})
 const int MIN_ANGLE = {min_angle};
 const int MAX_ANGLE = {max_angle};
+// Per-channel performed range (per-servo limit ∩ expressive range). No host
+// here to apply it, so it is compiled in.
+const int servoMin[{self.num_servos}] = {{{eff_min_str}}};
+const int servoMax[{self.num_servos}] = {{{eff_max_str}}};
 
-// Helper: Map 0-180 to MIN-MAX, reverse specified servos
+// Helper: clamp to the rig's range and reverse the specified channels.
+// Recorded positions are already degrees -- the range clamps, it does not scale.
 void writeServo(int index, int pos) {{
-  pos = map(pos, 0, 180, MIN_ANGLE, MAX_ANGLE);
-  pos = constrain(pos, MIN_ANGLE, MAX_ANGLE);
-  if({reversed_check}) pos = MAX_ANGLE - pos;  // Reverse {reversed_names}
-  servo[index].write(pos);
+  pos = constrain(pos, servoMin[index], servoMax[index]);
+  // Mirror within THIS channel's range, not a shared one.
+  if({reversed_check}) pos = servoMin[index] + servoMax[index] - pos;  // Reverse {reversed_names}
+  servo[index].write(constrain(pos, MIN_ANGLE, MAX_ANGLE));
 }}
 
 // PIR Motion Sensor
@@ -6488,22 +7978,24 @@ const uint8_t transitionMatrix[NUM_PHRASES][NUM_PHRASES] PROGMEM = {{
             max_duration = phrase['loop_duration']
             
             # LAYER PRIORITY for this phrase: Determine servo ownership (last layer wins)
-            phrase_servo_owner = [-1] * 8
+            phrase_servo_owner = [-1] * self.num_servos
             for layer_idx, layer in enumerate(phrase['layers']):
                 recorded_servos = layer.get('recorded_servos', {'fingers': set(), 'arm': set()})
                 for finger_idx in recorded_servos.get('fingers', []):
                     if finger_idx < 5:
                         phrase_servo_owner[finger_idx] = layer_idx
                 for arm_idx in recorded_servos.get('arm', []):
-                    if arm_idx < 3:
+                    if arm_idx < self.num_arm_servos:
                         phrase_servo_owner[5 + arm_idx] = layer_idx
             
             # Extract keyframes for all layers WITH TIME NORMALIZATION
             all_layer_keyframes = []
             for layer in phrase['layers']:
                 movements = sorted(layer['data'], key=lambda x: x['time'])
-                keyframes = self._extract_keyframes(movements)
-                
+                # copy: _extract_keyframes hands back the original frame dicts,
+                # and the normalize below rewrites 'time' in place
+                keyframes = [dict(kf) for kf in self._extract_keyframes(movements)]
+
                 # TIME NORMALIZE
                 layer_duration = layer['duration']
                 if layer_duration > 0 and max_duration > 0:
@@ -6528,7 +8020,7 @@ const uint8_t transitionMatrix[NUM_PHRASES][NUM_PHRASES] PROGMEM = {{
                 keyframes = layer_data['keyframes']
                 
                 # Find which servos this layer OWNS
-                owned_servos = [s for s in range(8) if phrase_servo_owner[s] == layer_idx]
+                owned_servos = [s for s in range(self.num_servos) if phrase_servo_owner[s] == layer_idx]
                 
                 if not owned_servos:
                     code += f"// Layer {layer_idx}: {layer_data['name']} - MASKED by later layer(s)\n"
@@ -6570,16 +8062,15 @@ const uint8_t transitionMatrix[NUM_PHRASES][NUM_PHRASES] PROGMEM = {{
             code += f"int phrase{phrase_idx}_layer_indices[{num_active}];\n\n"
         
         # Setup function
-        code += '''void setup() {
-  Serial.begin(9600);
-  delay(100);  // Give serial time to initialize
+        code += f'''void setup() {{
+  Serial.begin({self.hardware_config.get('baud_rate', 115200)});
 
   // Attach servos
-  for(int i = 0; i < 8; i++) {
+  for(int i = 0; i < {self.num_servos}; i++) {{
     servo[i].attach(servoPins[i]);
         writeServo(i, startupPositions[i]);
-  }
-  
+  }}
+
 '''
         
         if pir_enabled:
@@ -6623,30 +8114,30 @@ const uint8_t transitionMatrix[NUM_PHRASES][NUM_PHRASES] PROGMEM = {{
 '''
         
         if pir_enabled:
-            code += '''  // Check PIR sensor
-  if(digitalRead(PIR_PIN) == HIGH) {
+            code += f'''  // Check PIR sensor
+  if(digitalRead(PIR_PIN) == HIGH) {{
     motionDetected = true;
     lastMotionTime = millis();
-  }
-  
+  }}
+
   // Check motion timeout
-  if(motionDetected && (millis() - lastMotionTime > MOTION_TIMEOUT)) {
+  if(motionDetected && (millis() - lastMotionTime > MOTION_TIMEOUT)) {{
     motionDetected = false;
     Serial.println("No motion detected - pausing");
     // Return to center position
-    for(int i = 0; i < 8; i++) {
+    for(int i = 0; i < {self.num_servos}; i++) {{
       writeServo(i, 90);
-    }
+    }}
     delay(100);
     return;
-  }
+  }}
   
   // Only play phrases if motion detected
-  if(!motionDetected) {
+  if(!motionDetected) {{
     delay(100);
     return;
-  }
-  
+  }}
+
 '''
         
         code += '''  unsigned long elapsed = millis() - phraseStartTime;
@@ -6708,7 +8199,7 @@ void playPhrase(int phraseNum, unsigned long elapsed) {
         
         # Generate individual phrase playback functions using ownership info
         for phrase_idx, phrase in enumerate(phrases):
-            servo_owner = phrase.get('servo_owner', [-1] * 8)
+            servo_owner = phrase.get('servo_owner', [-1] * self.num_servos)
             active_layers = phrase.get('active_layers', list(range(len(phrase['layers']))))
             layer_keyframes = phrase.get('layer_keyframes', [])
             
@@ -6727,7 +8218,7 @@ void playPhrase(int phraseNum, unsigned long elapsed) {
                 keyframes = layer_data['keyframes']
                 
                 # Find servos this layer OWNS
-                owned_servos = [s for s in range(8) if servo_owner[s] == layer_idx]
+                owned_servos = [s for s in range(self.num_servos) if servo_owner[s] == layer_idx]
                 
                 if not owned_servos:
                     continue
@@ -6865,6 +8356,64 @@ void playPhrase(int phraseNum, unsigned long elapsed) {
         
         return keyframes
     
+    def resolve_export_filename(self, prefix):
+        """Filename for an export, from the name typed in the export dialog.
+
+        Falls back to a timestamp only when nothing was typed, so an unnamed
+        sketch is a deliberate choice rather than the default."""
+        raw = (getattr(self, 'pending_export_name', '') or '').strip()
+        if not raw:
+            return f"{prefix}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.ino"
+
+        # keep it a filename, not a path -- the dialog is a free text field
+        safe = ''.join(c for c in raw if c.isalnum() or c in ' _-').strip().replace(' ', '_')
+        if not safe:
+            return f"{prefix}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.ino"
+        if not safe.lower().endswith('.ino'):
+            safe += '.ino'
+
+        if os.path.exists(os.path.join(os.getcwd(), safe)):
+            if not tkinter.messagebox.askyesno(
+                    "Overwrite?", f"{safe} already exists.\n\nOverwrite it?"):
+                return None
+        return safe
+
+    def drivable_channels(self):
+        """Channels the CURRENT control mode can actually move."""
+        if self.control_mode.get() == 'cursor':
+            return {i for i in range(self.num_servos) if self.wave_enabled[i].get()}
+        return {self.selected_servo.get()}
+
+    def claimable_channels(self):
+        """Channels the next take would own: armed AND actually drivable.
+
+        Claiming a channel you are not driving is the whole bug. In cursor
+        mode the wave moves every enabled channel, so a take used to seize
+        all of them -- tick S1 to overdub it and S0 came along silently,
+        taking ownership away from the layer that actually performed it. Now
+        arming is explicit and separate from which bars are on the pad."""
+        return {i for i in self.drivable_channels() if self.rec_armed[i].get()}
+
+    def currently_claimed_channels(self):
+        """Global channel indices the in-progress take is performing.
+
+        Mirrors exactly what record_current_state will write, so playback and
+        recording can never disagree about who owns a channel. Empty when not
+        recording."""
+        if not self.layer_recording:
+            return set()
+        return self.claimable_channels()
+
+    def channel_angle(self, ch):
+        """Current angle for a global channel index, across both storage groups."""
+        if ch < self.num_fingers:
+            return self.finger_positions[ch]
+        return self.arm_positions[ch - self.num_fingers]
+
+    def on_wave_channel_toggled(self):
+        """A Wave On checkbox changed -- rebuild the pad to match."""
+        self.create_visual_feedback()
+
     def create_visual_feedback(self):
         """Create visual feedback elements on the canvas."""
         self.canvas.delete("all")
@@ -6881,86 +8430,69 @@ void playPhrase(int phraseNum, unsigned long elapsed) {
         bottom_y = canvas_h - 50  # More space for taller bars
         usable_h = max(1, bottom_y - top_y)
         
-        # Create finger position bars
+        # One bar per ENABLED channel. The canvas used to hardcode five finger
+        # bars plus three little arm dots, so channels 5-9 had no real presence
+        # on the pad you actually perform into. Now the "Wave On" checkboxes
+        # below the canvas ARE the canvas: tick a channel and its bar appears.
+        self.bar_channels = [i for i in range(self.num_servos)
+                             if self.wave_enabled[i].get()]
+
+        self.channel_bars = {}
+        self.channel_clamps = {}
+        self.channel_labels = {}
+        # legacy aliases -- some older code paths still index these
         self.finger_bars = []
         self.finger_clamp_markers = []
         self.finger_label_ids = []
-        bar_width = 40  # Slightly wider bars
-        bar_spacing = 62  # More spacing
-        start_x = 35
-        
-        for i in range(self.num_fingers):
-            x = start_x + (i * bar_spacing)
-            
-            # Background bar (full range) - taller bars
-            bg_bar = self.canvas.create_rectangle(
-                x, top_y, x + bar_width, bottom_y,
-                fill='#E0E0E0', outline='#CCCCCC', width=1
-            )
-            
-            # Position indicator bar
-            pos_bar = self.canvas.create_rectangle(
-                x, bottom_y - usable_h // 2, x + bar_width, bottom_y - usable_h // 2,
-                fill='#4CAF50', outline='#45A049', width=1
-            )
-
-            # Clamp markers (min=max full range by default; updated live)
-            min_marker = self.canvas.create_line(
-                x, bottom_y, x + bar_width, bottom_y,
-                fill='#0D47A1', width=2, dash=(3, 2)
-            )
-            max_marker = self.canvas.create_line(
-                x, top_y, x + bar_width, top_y,
-                fill='#B71C1C', width=2, dash=(3, 2)
-            )
-            
-            # Label
-            label_id = self.canvas.create_text(
-                x + bar_width//2, bottom_y + 22,
-                text=self.finger_names[i][:3],  # Short name
-                font=('Arial', 8), fill='#333333'
-            )
-            
-            self.finger_bars.append((bg_bar, pos_bar))
-            self.finger_clamp_markers.append((min_marker, max_marker))
-            self.finger_label_ids.append(label_id)
-        
-        # Create arm servo indicators (smaller, on the right)
         self.arm_indicators = []
         self.arm_label_ids = []
         self.arm_range_text_ids = []
-        arm_start_x = start_x + (self.num_fingers * bar_spacing) + 12
-        
-        for i in range(self.num_arm_servos):
-            y = top_y + (i * 58)
-            
-            # Small circular indicator
-            indicator = self.canvas.create_oval(
-                arm_start_x, y, arm_start_x + 15, y + 15,
-                fill='#FF9800', outline='#F57C00', width=1
-            )
-            
-            # Label
-            label_id = self.canvas.create_text(
-                arm_start_x - 5, y + 7,
-                text=self.arm_names[i][:2],  # Very short name
-                font=('Arial', 7), fill='#333333', anchor='e'
-            )
 
-            range_text_id = self.canvas.create_text(
-                arm_start_x + 20, y + 7,
-                text="0-180",
-                font=('Arial', 7), fill='#666666', anchor='w'
-            )
-            
-            self.arm_indicators.append(indicator)
-            self.arm_label_ids.append(label_id)
-            self.arm_range_text_ids.append(range_text_id)
-        
+        n_bars = len(self.bar_channels)
+        if n_bars:
+            start_x = 35
+            # Fit however many are enabled into the pad rather than running off
+            # the right edge once you pass five.
+            avail = max(120, canvas_w - start_x - 20)
+            slot = min(62, avail / n_bars)
+            bar_width = max(12, int(slot * 0.62))
+
+            for slot_idx, ch in enumerate(self.bar_channels):
+                x = start_x + int(slot_idx * slot)
+
+                bg_bar = self.canvas.create_rectangle(
+                    x, top_y, x + bar_width, bottom_y,
+                    fill='#E0E0E0', outline='#CCCCCC', width=1
+                )
+                pos_bar = self.canvas.create_rectangle(
+                    x, bottom_y - usable_h // 2, x + bar_width, bottom_y - usable_h // 2,
+                    fill='#4CAF50', outline='#45A049', width=1
+                )
+                min_marker = self.canvas.create_line(
+                    x, bottom_y, x + bar_width, bottom_y,
+                    fill='#0D47A1', width=2, dash=(3, 2)
+                )
+                max_marker = self.canvas.create_line(
+                    x, top_y, x + bar_width, top_y,
+                    fill='#B71C1C', width=2, dash=(3, 2)
+                )
+                label_id = self.canvas.create_text(
+                    x + bar_width // 2, bottom_y + 22,
+                    text=f"S{ch}",
+                    font=('Arial', 8), fill='#333333'
+                )
+
+                self.channel_bars[ch] = (bg_bar, pos_bar)
+                self.channel_clamps[ch] = (min_marker, max_marker)
+                self.channel_labels[ch] = label_id
+
         # Add instructions
+        hint = ("Move mouse here - no channels enabled" if not n_bars
+                else f"Move mouse here - driving {n_bars} channel"
+                     f"{'s' if n_bars != 1 else ''}")
         self.canvas.create_text(
             min(canvas_w // 2, 190), 14,
-            text="Move mouse here for finger control",
+            text=hint,
             font=('Arial', 10), fill='#666666'
         )
         
@@ -6988,87 +8520,45 @@ void playPhrase(int phraseNum, unsigned long elapsed) {
     def update_visual_feedback(self):
         """Update the visual feedback based on current servo positions."""
         # Update finger bars
-        for i, (bg_bar, pos_bar) in enumerate(self.finger_bars):
-            if i < len(self.finger_positions):
-                # Convert angle (0-180) to bar position (30-200)
-                angle = self.finger_positions[i]
-                coords = self.canvas.coords(bg_bar)
-                x_left, y_top, x_right, y_bottom = coords
-                total_h = max(1, int(y_bottom - y_top))
-                bar_height = int((angle / 180.0) * total_h)
-                
-                bar_top = y_bottom - bar_height  # Invert so 0° is at bottom
-                bar_bottom = y_bottom
-                x = x_left
-                bar_width = x_right - x_left
-                
-                # Update position bar
-                self.canvas.coords(pos_bar, x, bar_top, x + bar_width, bar_bottom)
+        # If the enabled set changed under us, rebuild before drawing
+        current = [i for i in range(self.num_servos) if self.wave_enabled[i].get()]
+        if current != getattr(self, 'bar_channels', None):
+            self.create_visual_feedback()
+            return
 
-                # Update clamp markers on full-scale bar (always 0-180 visual)
-                min_lim, max_lim = self.servo_limits[i]
-                min_y = y_bottom - int((min_lim / 180.0) * total_h)
-                max_y = y_bottom - int((max_lim / 180.0) * total_h)
-                min_marker, max_marker = self.finger_clamp_markers[i]
-                self.canvas.coords(min_marker, x, min_y, x + bar_width, min_y)
-                self.canvas.coords(max_marker, x, max_y, x + bar_width, max_y)
+        for ch, (bg_bar, pos_bar) in self.channel_bars.items():
+            angle = self.channel_angle(ch)
+            x_left, y_top, x_right, y_bottom = self.canvas.coords(bg_bar)
+            total_h = max(1, int(y_bottom - y_top))
+            bar_height = int((angle / 180.0) * total_h)
 
-                # Show reverse state and disabled state directly on finger label
-                label = self.finger_names[i][:3]
-                if self.servo_reversed[i]:
-                    label += "↺"
-                if not self.finger_wave_enabled[i].get():
-                    label += "○"  # Circle indicates disabled from wave
-                self.canvas.itemconfig(self.finger_label_ids[i], text=label)
-                
-                # Color based on angle (muted if disabled from wave)
-                wave_enabled = self.finger_wave_enabled[i].get()
-                if not wave_enabled:
-                    color = '#888888'  # Gray for disabled fingers
-                elif 70 <= angle <= 110:  # Near center
-                    color = '#4CAF50'  # Green
-                elif angle < 70:
-                    color = '#2196F3'  # Blue
-                else:
-                    color = '#FF5722'  # Red
-                
-                self.canvas.itemconfig(pos_bar, fill=color)
-        
-        # Update arm indicators (change size based on position)
-        for i, indicator in enumerate(self.arm_indicators):
-            if i < len(self.arm_positions):
-                angle = self.arm_positions[i]
-                # Size based on angle (10-20 pixels)
-                size = 10 + int((angle / 180.0) * 10)
-                
-                coords = self.canvas.coords(indicator)
-                arm_start_x = coords[0]
-                y = coords[1]
-                
-                self.canvas.coords(indicator, 
-                                 arm_start_x, y, 
-                                 arm_start_x + size, y + size)
-                
-                # Color based on angle
-                if 70 <= angle <= 110:
-                    color = '#FF9800'  # Orange
-                elif angle < 70:
-                    color = '#3F51B5'  # Indigo
-                else:
-                    color = '#E91E63'  # Pink
-                
-                self.canvas.itemconfig(indicator, fill=color)
+            bar_top = y_bottom - bar_height  # Invert so 0 deg sits at the bottom
+            x = x_left
+            bar_width = x_right - x_left
 
-                # Update arm label and clamp text
-                servo_idx = self.num_fingers + i
-                arm_label = self.arm_names[i][:2]
-                if self.servo_reversed[servo_idx]:
-                    arm_label += "↺"
-                self.canvas.itemconfig(self.arm_label_ids[i], text=arm_label)
+            self.canvas.coords(pos_bar, x, bar_top, x + bar_width, y_bottom)
 
-                min_lim, max_lim = self.servo_limits[servo_idx]
-                self.canvas.itemconfig(self.arm_range_text_ids[i], text=f"{min_lim}-{max_lim}")
-        
+            # Clamp markers on the full-scale bar (always 0-180 visual)
+            min_lim, max_lim = self.servo_limits[ch]
+            min_y = y_bottom - int((min_lim / 180.0) * total_h)
+            max_y = y_bottom - int((max_lim / 180.0) * total_h)
+            min_marker, max_marker = self.channel_clamps[ch]
+            self.canvas.coords(min_marker, x, min_y, x + bar_width, min_y)
+            self.canvas.coords(max_marker, x, max_y, x + bar_width, max_y)
+
+            label = f"S{ch}"
+            if self.servo_reversed[ch]:
+                label += "↺"
+            self.canvas.itemconfig(self.channel_labels[ch], text=label)
+
+            if 70 <= angle <= 110:      # near centre
+                color = '#4CAF50'
+            elif angle < 70:
+                color = '#2196F3'
+            else:
+                color = '#FF5722'
+            self.canvas.itemconfig(pos_bar, fill=color)
+
         # Update mode indicator
         mode = self.control_mode.get()
         mode_text = "Mode: Cursor Wave Control" if mode == "cursor" else "Mode: Individual Servo Control"
@@ -7077,7 +8567,7 @@ void playPhrase(int phraseNum, unsigned long elapsed) {
 
 def main():
     """Main function to start the simple hand control interface."""
-    print("[START] Starting Simple 8-Servo Hand Control...")
+    print("[START] Starting Simple 10-Servo Hand Control...")
     
     try:
         interface = SimpleHandControl()
