@@ -1,0 +1,57 @@
+{
+  "version": "1.0",
+  "preset_type": "servo_calibration",
+  "timestamp": "20260802_021449",
+  "default_port": "COM4",
+  "servo_limits": [
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      180
+    ]
+  ],
+  "servo_reversed": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+  ],
+  "cursor_settings": {
+    "wave": 6.2,
+    "wave_y": 2.1,
+    "range": 180.0,
+    "gravity": 0.7,
+    "offset": 10.0
+  }
+}
