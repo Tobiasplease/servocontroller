@@ -19,11 +19,22 @@ import customtkinter as ctk
 import time
 import math
 import os
+import sys
 import json
 import shutil
 import datetime
 import random
 from typing import Optional
+
+# Where the app keeps its config and recordings. Frozen into a onefile EXE,
+# __file__ points inside PyInstaller's temp extraction dir, which is wiped on
+# exit -- so anything saved there is lost. sys.executable is the EXE itself, so
+# config and recordings sit beside it and survive being copied to another
+# machine. Running as a script this is the repo folder, exactly as before.
+if getattr(sys, 'frozen', False):
+    APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Import hand controller from local module
 try:
@@ -114,7 +125,7 @@ class SimpleHandControl:
             'per_servo_limits': [[0, 180] for _ in range(10)],
             'pir_pin': 2,  # moved off 3 so that pin can drive servo S9
         }
-        self.hardware_config_file = 'hardware_config.json'
+        self.hardware_config_file = os.path.join(APP_DIR, 'hardware_config.json')
         self.load_hardware_config()  # Load saved config if exists
         self.migrate_hardware_config()  # grow 8-servo presets to 10
 
@@ -219,6 +230,16 @@ class SimpleHandControl:
         self.pir_crossfade_duration_min = tk.IntVar(value=8)   # Min crossfade length (seconds)
         self.pir_crossfade_duration_max = tk.IntVar(value=15)   # Max crossfade length (seconds)
         
+        # What drives the chain. 'pir' is the three-state sensor machine;
+        # 'none' is one pool crossfading forever, for pieces with no sensor.
+        #
+        # The crossfade engine never needed the sensor -- it picks a random
+        # next recording at a random interval and blends into it, which is the
+        # whole behaviour. The state machine is a wrapper on top, so this
+        # selects whether that wrapper is emitted at all. Kept as a string
+        # rather than a bool so timed multi-chain can join as another value.
+        self.chain_trigger = tk.StringVar(value='pir')
+
         # Boot lockout: hold IDLE and ignore the sensor for this long after
         # power-up. A PIR needs 30-60s to settle its ambient reference and
         # false-triggers while it does, so a piece that wakes into ACTIVE the
@@ -237,7 +258,7 @@ class SimpleHandControl:
         
         # Cache for loaded PIR recordings {filename: layers_data}
         self.pir_cached_recordings = {}
-        self.pir_recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pir_recordings")
+        self.pir_recordings_dir = os.path.join(APP_DIR, "pir_recordings")
         
         # State transition tracking
         self.pir_blend_factor = 0.0  # 0.0-1.0 for smooth state transitions
@@ -705,7 +726,9 @@ class SimpleHandControl:
         tk.Label(port_row, text="PIR pin D:", bg=self.colors['bg_frame'],
                 fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT, padx=(12, 0))
         self.config_pir_pin_var = tk.IntVar(value=self.hardware_config.get('pir_pin', 2))
-        tk.Spinbox(port_row, from_=0, to=19, textvariable=self.config_pir_pin_var,
+        # D2 upward: D0/D1 are the serial TX/RX pins, and a sensor there fights
+        # the USB link. Upper bound 19 covers A0-A5 used as digital inputs.
+        tk.Spinbox(port_row, from_=2, to=19, textvariable=self.config_pir_pin_var,
                    width=4, font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
 
         # Pin mapping -- editable, because the whole point of numbered channels
@@ -785,7 +808,7 @@ class SimpleHandControl:
 
         self.pir_expanded = False
         self.pir_panel_btn = ctk.CTkButton(self.pir_container,
-                                       text="▶ PIR State Machine",
+                                       text="▶ Movement Chains",
                                        command=self.toggle_pir_panel,
                                        fg_color="transparent", text_color=self.colors['text_main'],
                                        font=('Arial', 11, 'bold'), anchor='w',
@@ -795,7 +818,7 @@ class SimpleHandControl:
         self.pir_content = tk.Frame(self.pir_container, bg=self.colors['bg_main'])
         # not packed -- starts collapsed
 
-        pir_main_frame = tk.LabelFrame(self.pir_content, text="PIR State Machine (Test & Export)",
+        pir_main_frame = tk.LabelFrame(self.pir_content, text="Movement Chains (Test & Export)",
                                        bg=self.colors['bg_frame'], fg=self.colors['text_main'],
                                        font=('Arial', 10, 'bold'))
         pir_main_frame.pack(fill=tk.X, pady=(5, 10), padx=5)
@@ -804,7 +827,19 @@ class SimpleHandControl:
         pir_top_row = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
         pir_top_row.pack(fill=tk.X, padx=10, pady=5)
         
-        self.pir_enable_cb = tk.Checkbutton(pir_top_row, text="Enable PIR Mode", 
+        # What drives the chain. Sits before the enable toggle because it
+        # decides what the rest of the panel even means.
+        tk.Label(pir_top_row, text="Trigger:", bg=self.colors['bg_frame'],
+                fg=self.colors['text_main'], font=('Arial', 9)).pack(side=tk.LEFT, padx=(0, 4))
+        self.chain_trigger_combo = ttk.Combobox(
+            pir_top_row, width=22, state='readonly',
+            values=["PIR motion sensor", "None (continuous loop)"])
+        self.chain_trigger_combo.current(0)
+        self.chain_trigger_combo.bind(
+            '<<ComboboxSelected>>', lambda e: self.on_chain_trigger_changed())
+        self.chain_trigger_combo.pack(side=tk.LEFT, padx=(0, 12))
+
+        self.pir_enable_cb = tk.Checkbutton(pir_top_row, text="Enable PIR Mode",
                                            variable=self.pir_enabled,
                                            bg=self.colors['bg_frame'], fg=self.colors['text_main'],
                                            font=('Arial', 9, 'bold'),
@@ -913,11 +948,16 @@ class SimpleHandControl:
         sleep_card, self.pir_sleep_listbox = create_state_card(
             pir_states_frame, "SLEEP", self.pir_sleep_recordings, 'sleep')
         sleep_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0))
-        
+
+        # Kept so the trigger can hide the two states that only a sensor drives
+        self.pir_idle_card = idle_card
+        self.pir_sensor_cards = (active_card, sleep_card)
+
         # Timing row
         pir_timing_frame = tk.Frame(pir_main_frame, bg=self.colors['bg_frame'])
         pir_timing_frame.pack(fill=tk.X, padx=10, pady=(5, 10))
-        
+        self.pir_timing_frame = pir_timing_frame
+
         tk.Label(pir_timing_frame, text="Active duration:", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_main'], font=('Arial', 8)).pack(side=tk.LEFT)
         tk.Spinbox(pir_timing_frame, from_=5, to=120, width=4, 
@@ -1093,9 +1133,13 @@ class SimpleHandControl:
                 variable=self.cursor_sensitivity, length=90,
                 font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
 
-        tk.Label(param_frame1, text="Sens Y:", bg=self.colors['bg_frame'],
+        # Not "sensitivity" -- it cannot change how far the cursor reaches, only
+        # how the travel is distributed. 1.0 is linear, <1 finer near the
+        # centre, >1 finer near the ends. Both extremes stay reachable at any
+        # setting, which is the whole point.
+        tk.Label(param_frame1, text="Y Curve:", bg=self.colors['bg_frame'],
                 font=('Arial', 8)).pack(side=tk.LEFT, padx=(5, 0))
-        tk.Scale(param_frame1, from_=0.1, to=4.0, resolution=0.1, orient=tk.HORIZONTAL,
+        tk.Scale(param_frame1, from_=0.2, to=3.0, resolution=0.1, orient=tk.HORIZONTAL,
                 variable=self.cursor_sensitivity_y, length=90,
                 font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
 
@@ -1118,12 +1162,23 @@ class SimpleHandControl:
         param_frame2 = tk.Frame(self.wave_cfg_content, bg=self.colors['bg_frame'])
         param_frame2.pack(fill=tk.X, padx=4, pady=(2, 4))
         
-        tk.Label(param_frame2, text="Gravity:", bg=self.colors['bg_frame'], 
+        # Was "Gravity", when the two terms were averaged. Now the wave is a
+        # deviation added on top of the Y position: 0 = pure Y, all channels
+        # together; 1 = full wave spread around it.
+        tk.Label(param_frame2, text="Wave Depth:", bg=self.colors['bg_frame'],
                 font=('Arial', 8)).pack(side=tk.LEFT)
-        tk.Scale(param_frame2, from_=0.0, to=1.0, resolution=0.1, orient=tk.HORIZONTAL,
-                variable=self.wave_gravity, length=100, 
+        tk.Scale(param_frame2, from_=0.0, to=1.0, resolution=0.05, orient=tk.HORIZONTAL,
+                variable=self.wave_gravity, length=100,
                 font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
-        
+
+        # Previously had no control at all -- the variable was read in
+        # on_mouse_move and then never used.
+        tk.Label(param_frame2, text="Range:", bg=self.colors['bg_frame'],
+                font=('Arial', 8)).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Scale(param_frame2, from_=10.0, to=180.0, resolution=5.0, orient=tk.HORIZONTAL,
+                variable=self.servo_range, length=100,
+                font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
+
         tk.Label(param_frame2, text="Offset:", bg=self.colors['bg_frame'],
                 font=('Arial', 8)).pack(side=tk.LEFT, padx=(10,0))
         tk.Scale(param_frame2, from_=-45.0, to=45.0, resolution=5.0, orient=tk.HORIZONTAL,
@@ -1679,7 +1734,7 @@ class SimpleHandControl:
         }
 
         try:
-            with open(filename, 'w') as f:
+            with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(preset, f, indent=2)
             tkinter.messagebox.showinfo("Preset Saved", f"Servo preset saved to:\n{filename}")
             print(f"💾 Servo preset saved: {filename}")
@@ -2025,29 +2080,49 @@ class SimpleHandControl:
             # Position within the wave, 0..1 across the enabled channels
             finger_offset = (slot / max(len(active) - 1, 1)) - 0.5  # -0.5 to 0.5
 
-            # Wave influence from X position
-            wave_influence = math.sin((x_norm + finger_offset) * math.pi * sensitivity_x)
-
-            # Gravity pull from Y position (0=top pulls up, 1=bottom pulls down)
-            # Y sensitivity scales how much of the pad's height you need to
-            # travel for full deflection; clamped so >1.0 saturates early
-            # rather than wrapping past the ends of the range.
-            gravity_pull = (y_norm - 0.5) * 2 * sensitivity_y  # -1 (top) to 1 (bottom)
-            gravity_pull = max(-1.0, min(1.0, gravity_pull))
-            
-            # Combine: wave creates the pattern, gravity pulls everything up/down
-            total_influence = wave_influence * (1.0 - gravity) + gravity_pull * gravity
-
-            # Convert influence (-1..1) to selected servo's full clamp span (min..max)
-            # so reduced physical ranges still use the entire mouse expressive space.
-            min_lim, max_lim = self.servo_limits[i]
+            min_lim, max_lim = self.effective_limits_for(i)
             span = max(max_lim - min_lim, 1)
 
-            # Apply offset/range shaping before normalization
-            shaped = total_influence + (offset / 90.0)
-            shaped = max(-1.0, min(1.0, shaped))
+            # Y drives the FULL range, on its own.
+            #
+            # This used to be a convex blend:
+            #     influence = wave * (1 - gravity) + gravity_pull * gravity
+            # which averages the two terms, so NEITHER could reach an extreme
+            # by itself. At the default gravity of 0.5 the reachable minimum
+            # was gravity_pull * 0.5 = -0.5, i.e. a quarter of the way up the
+            # span -- 45 degrees on a 0-180 rig, exactly the floor that could
+            # not be driven through. Turning sensitivity up did not help: it
+            # only saturated gravity_pull sooner, and it was already saturated.
+            #
+            # Now Y maps straight onto 0..1 and the wave is a deviation ADDED
+            # to it, so the ends are always reachable: cursor at the top = one
+            # end of the span, cursor at the bottom = the other.
+            d = (y_norm - 0.5) * 2.0                      # -1 (top) .. +1 (bottom)
+            gamma = max(0.1, sensitivity_y)
+            # Curve only -- copysign keeps the endpoints at exactly -1 and +1,
+            # so this changes the FEEL of the travel, never how far it reaches.
+            d = math.copysign(abs(d) ** gamma, d)
+            base = (d + 1.0) / 2.0                        # 0..1, endpoints exact
 
-            norm_01 = (shaped + 1.0) / 2.0
+            # Wave from X position, added as a deviation around that base
+            wave_influence = math.sin((x_norm + finger_offset) * math.pi * sensitivity_x)
+
+            # Taper the wave to nothing at the extremes so the ends stay
+            # absolute for EVERY channel -- otherwise a channel whose sine is
+            # negative sits short of the end even with the cursor hard against
+            # it, which is the same complaint in a smaller form.
+            taper = 2.0 * min(base, 1.0 - base)           # 1 at centre, 0 at ends
+            norm_01 = base + wave_influence * gravity * 0.5 * taper
+            norm_01 = max(0.0, min(1.0, norm_01))
+
+            # How much of the span the cursor sweeps, about the centre. This
+            # was read and then never used, so the control did nothing at all.
+            scale = max(0.0, min(1.0, servo_range / 180.0))
+            norm_01 = 0.5 + (norm_01 - 0.5) * scale
+
+            # Offset shifts the centre of that sweep
+            norm_01 = max(0.0, min(1.0, norm_01 + offset / 180.0))
+
             angle = min_lim + (norm_01 * span)
 
             # Optional per-servo reverse in wave controller
@@ -2297,7 +2372,7 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         filepath = os.path.join(os.getcwd(), filename)
         
         try:
-            with open(filepath, 'w') as f:
+            with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(code)
             
             tkinter.messagebox.showinfo("ARM SCRATCH Export Successful", 
@@ -2388,8 +2463,13 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
         # Track which servos are being recorded (changed during recording)
         self.recorded_servos = {'fingers': set(), 'arm': set()}
         
-        # Auto-start playback if there are existing layers
-        if self.recorded_layers and not self.is_playing:
+        # Auto-start playback so the new layer can be overdubbed against the
+        # existing ones. Skipped while the chain is driving playback:
+        # update_playback takes its material from the library in that case, so
+        # this would start a whole chain movement underneath the take instead
+        # of your own layers -- and only from the second layer on, since the
+        # first has nothing to overdub against.
+        if self.recorded_layers and not self.is_playing and not self.pir_enabled.get():
             self.is_playing = True
             self.playback_start_time = time.time()
             self.playback_index = 0
@@ -2504,9 +2584,28 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
             return 'pir'
         return 'basic'
 
+    def pir_assigned_count(self):
+        """How many library recordings are assigned across the three states."""
+        return (len(self.pir_idle_recordings) + len(self.pir_active_recordings)
+                + len(self.pir_sleep_recordings))
+
     def export_mode_available(self, mode):
-        """(ok, reason) for a mode given current state."""
-        if mode in ('basic', 'markov', 'pir') and not self.recorded_layers:
+        """(ok, reason) for a mode given current state.
+
+        A PIR export reads the STATE ASSIGNMENTS, not recorded_layers -- the
+        movement comes out of the library, which is why the state cards can be
+        full and a take still not be "recorded" in this session. Gating those
+        modes on recorded_layers told people with a complete, exportable setup
+        that they had nothing to export."""
+        pir_modes = ('pir', 'markov')
+        if mode in pir_modes and self.pir_enabled.get():
+            if not self.pir_assigned_count():
+                return False, "no recordings assigned to IDLE / ACTIVE / SLEEP"
+            if mode == 'markov' and not self.pir_markov_enabled.get():
+                return True, "Markov is off in the PIR panel"
+            return True, ""
+
+        if mode in ('basic',) + pir_modes and not self.recorded_layers:
             return False, "no layers recorded"
         if mode == 'pir' and not self.pir_enabled.get():
             return True, "PIR mode is off - will export current layers as states"
@@ -2516,11 +2615,23 @@ void setScratchPosition(int rotate, int tilt, int elbowPos) {
 
     def open_export_dialog(self):
         """One export door. Shows what will be written, from live UI state."""
-        if not self.recorded_layers and self.detect_export_mode() != 'scratch':
-            tkinter.messagebox.showwarning(
-                "Nothing to export",
-                "No layers recorded yet.\n\nRecord a pass first, or pick "
-                "\"Scratch movement only\" which does not use layers.")
+        # Ask the mode itself whether it has a source, rather than assuming that
+        # source is always recorded_layers. And say what is actually missing:
+        # this warning used to fire at anyone in PIR mode with a full library,
+        # then fall through and open the dialog anyway, so it read as a bug in
+        # the warning rather than information about the export.
+        mode = self.detect_export_mode()
+        ok, reason = self.export_mode_available(mode)
+        if not ok:
+            if mode in ('pir', 'markov'):
+                detail = ("No recordings are assigned to IDLE / ACTIVE / SLEEP.\n\n"
+                          "Add takes to the state cards with the + buttons, or save "
+                          "the current pass to the library first.")
+            else:
+                detail = ("No layers recorded yet.\n\nRecord a pass first, or pick "
+                          "\"Scratch movement only\", which does not use layers.")
+            tkinter.messagebox.showwarning("Nothing to export", detail)
+            return
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Export .ino")
@@ -2993,10 +3104,10 @@ void processCommand(String command) {{
         self.pir_expanded = not self.pir_expanded
         if self.pir_expanded:
             self.pir_content.pack(fill=tk.X, pady=(0, 5))
-            self.pir_panel_btn.configure(text="▼ PIR State Machine")
+            self.pir_panel_btn.configure(text="▼ Movement Chains")
         else:
             self.pir_content.pack_forget()
-            self.pir_panel_btn.configure(text="▶ PIR State Machine")
+            self.pir_panel_btn.configure(text="▶ Movement Chains")
     
     def apply_and_save_config(self):
         """Apply hardware config from UI and save to file."""
@@ -3192,7 +3303,7 @@ void processCommand(String command) {{
                 'layers': layers_to_save
             }
             
-            with open(filepath, 'w') as f:
+            with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(save_data, f, indent=2)
             
             print(f"📚 Saved to PIR library: {name}")
@@ -3349,6 +3460,53 @@ void processCommand(String command) {{
         """Legacy compatibility - now a no-op since we use listboxes."""
         pass  # Listboxes are updated directly via add/remove
     
+    def on_chain_trigger_changed(self):
+        """Show only the controls the selected trigger actually uses."""
+        continuous = self.chain_trigger_combo.current() == 1
+        self.chain_trigger.set('none' if continuous else 'pir')
+
+        # ACTIVE and SLEEP exist only because a sensor moves between them. With
+        # no sensor there is one pool, and leaving the other two on screen
+        # invites exactly the setup that prompted this: recordings parked in a
+        # state nothing will ever enter.
+        for card in getattr(self, 'pir_sensor_cards', ()):
+            if continuous:
+                card.pack_forget()
+            else:
+                card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        if hasattr(self, 'pir_idle_card'):
+            self.pir_idle_card.configure(text="CHAIN" if continuous else "IDLE")
+
+        # Sensor timings mean nothing without a sensor
+        if hasattr(self, 'pir_timing_frame'):
+            if continuous:
+                self.pir_timing_frame.pack_forget()
+            else:
+                self.pir_timing_frame.pack(fill=tk.X, padx=10, pady=(5, 10))
+
+        # Simulate Motion means nothing with no sensor, but the enable toggle
+        # must stay live: it is what decides whether playback comes from the
+        # chain library or from your recorded layers. Forcing it on and then
+        # greying it out meant pressing record started a new layer while the
+        # chain was still driving the servos -- an entire movement playing
+        # underneath the take, with no way to stop it.
+        simulate = getattr(self, 'pir_simulate_btn', None)
+        if simulate is not None:
+            try:
+                simulate.configure(state='disabled' if continuous else 'normal')
+            except Exception:
+                pass
+        enable_cb = getattr(self, 'pir_enable_cb', None)
+        if enable_cb is not None:
+            try:
+                enable_cb.configure(
+                    state='normal',
+                    text="Play Chain" if continuous else "Enable PIR Mode")
+            except Exception:
+                pass
+
+        self.update_pir_state_display()
+
     def on_pir_toggle(self):
         """Toggle PIR testing mode."""
         if self.pir_enabled.get():
@@ -3356,7 +3514,9 @@ void processCommand(String command) {{
             self.pir_state = 'idle'
             self.pir_state_start_time = time.time()
             self.pir_last_motion_time = time.time()  # Start fresh
-            self.pir_simulate_btn.configure(state='normal')
+            # Simulate Motion stays disabled with no sensor to simulate
+            if self.chain_trigger.get() != 'none':
+                self.pir_simulate_btn.configure(state='normal')
             self.update_pir_state_display()
 
             # Randomize starting recording per state so we don't bias index 0.
@@ -3376,7 +3536,10 @@ void processCommand(String command) {{
                 self.is_playing = True
                 self.playback_start_time = time.time()
             
-            print(f"🔴 PIR Mode enabled - starting in IDLE state")
+            if self.chain_trigger.get() == 'none':
+                print(f"▶ Chain playing - {len(self.pir_idle_recordings)} recording(s) in the pool")
+            else:
+                print(f"🔴 PIR Mode enabled - starting in IDLE state")
         else:
             # Disable PIR mode
             self.pir_state = 'idle'
@@ -3462,7 +3625,25 @@ void processCommand(String command) {{
         """Update PIR state machine - called from control_loop."""
         if not self.pir_enabled.get():
             return
-        
+
+        # Continuous mode has one pool and no states, so the transitions below
+        # are skipped -- that is what stops the sleep timeout cutting in.
+        #
+        # But the crossfade scheduler lives at the BOTTOM of this method, so
+        # returning outright took the chain's only means of advancing with it
+        # and the pool sat on whichever recording it started on. Run the
+        # crossfade, skip the state machine.
+        if self.chain_trigger.get() == 'none':
+            if self.pir_state != 'idle':
+                self.pir_state = 'idle'
+                self.pir_state_start_time = time.time()
+            self.pir_last_motion_time = time.time()
+            self.pir_blend_factor = 1.0        # no state blend to apply
+            if self.pir_crossfade_enabled.get():
+                self._update_recording_crossfade(current_time)
+            return
+
+
         current_time = time.time()
         time_since_motion = current_time - self.pir_last_motion_time
         time_in_state = current_time - self.pir_state_start_time
@@ -3536,6 +3717,14 @@ void processCommand(String command) {{
             'sleep': ('#9966CC', 'SLEEP')
         }
         color, text = state_colors.get(self.pir_state, ('#888888', 'OFF'))
+        # There are no states without a sensor -- reporting "IDLE" invites the
+        # question of what the other states are and when they happen. Report
+        # whether the chain is running instead, which is the only fact there is.
+        if self.chain_trigger.get() == 'none':
+            if self.pir_enabled.get():
+                color, text = ('#00CC00', 'PLAYING')
+            else:
+                color, text = ('#888888', 'STOPPED')
         self.pir_state_label.config(text=text, bg=color)
         
         # Check if Markov mode is active
@@ -4327,10 +4516,23 @@ void processCommand(String command) {{
         except Exception as e:
             tkinter.messagebox.showerror("Export Failed", f"Failed to export:\n{e}")
     
-    def generate_pir_state_machine_code(self, recordings):
-        """Generate Arduino code for the PIR state machine.
+    def generate_pir_state_machine_code(self, recordings, continuous=None):
+        """Generate Arduino code for the movement chain.
+
         recordings format: {state: [{name, layers}, ...]}
+
+        continuous=True drops the sensor layer entirely and emits one pool that
+        crossfades forever. Defaults to whatever the Trigger dropdown says, so
+        callers that predate the setting keep working.
         """
+        if continuous is None:
+            continuous = (self.chain_trigger.get() == 'none')
+        if continuous:
+            # One pool only. The IDLE list is the pool -- keeping the internal
+            # key means the table names, lookup switch and crossfade state all
+            # stay exactly as the PIR path emits them, so the two modes cannot
+            # drift. A future timed multi-chain mode adds keys here instead.
+            recordings = {'idle': (recordings or {}).get('idle', [])}
         
         # Hardware config
         hw = self.hardware_config
@@ -4875,15 +5077,78 @@ void loop() {
 
   // Update state machine
   checkStateTransitions();
-  
+
   // Update servo positions
   updateServos();
-  
+
   delay(UPDATE_INTERVAL);
 }
 '''
-        
+
+        if continuous:
+            # Continuous mode: no sensor, no states, nothing to interrupt the
+            # chain. Everything above that reads the pin or runs a timeout is
+            # replaced by this loop -- the crossfade engine on its own, which
+            # is what was doing the interesting work all along.
+            code = self._strip_sensor_layer(code)
+            code += '''
+void loop() {
+  // One pool, crossfading at random intervals, forever. There is no sensor
+  // and no sleep timeout, so nothing interrupts the chain.
+  updateServos();
+  delay(UPDATE_INTERVAL);
+}
+'''
+
         return code
+
+    # Blocks that only exist to serve the sensor. Removing them is what turns
+    # the state machine into a plain chain; they are matched by their opening
+    # line so the generator above stays a single source for both modes.
+    _SENSOR_ONLY_FUNCS = ('void checkStateTransitions()', 'void triggerMotion()')
+
+    def _strip_sensor_layer(self, code):
+        """Drop the PIR-only declarations and functions from a generated sketch.
+
+        Continuous mode shares the whole generator with the PIR mode so the two
+        cannot drift apart -- the movement tables, crossfade engine, limits and
+        rest pose are emitted once and used by both. Only the sensor wrapper
+        differs, so it is removed here rather than duplicated into a second
+        generator that would need every future fix applied twice.
+        """
+        drop_decl = ('#define PIR_PIN', 'const unsigned long STARTUP_LOCKOUT',
+                     'const unsigned long ACTIVE_DURATION', 'const unsigned long SLEEP_TIMEOUT')
+        # loop() goes too; the caller emits the continuous one in its place
+        drop_funcs = self._SENSOR_ONLY_FUNCS + ('void loop()',)
+
+        lines = code.splitlines(True)
+        out, i, n = [], 0, len(lines)
+        while i < n:
+            line = lines[i]
+            if line.startswith(drop_funcs):
+                # Skip the whole body by brace depth rather than by blank line,
+                # so a nested block inside it cannot end the skip early.
+                depth, opened = 0, False
+                while i < n:
+                    depth += lines[i].count('{') - lines[i].count('}')
+                    if '{' in lines[i]:
+                        opened = True
+                    i += 1
+                    if opened and depth <= 0:
+                        break
+                continue
+            stripped = line.strip()
+            if stripped.startswith(drop_decl) or 'pinMode(PIR_PIN' in stripped:
+                i += 1
+                continue
+            # The banner sits in a non-f-string block shared by both modes, so
+            # the state name is corrected here rather than interpolated there.
+            if 'Ready - starting in IDLE state' in line:
+                line = line.replace('Ready - starting in IDLE state',
+                                    'Ready - continuous chain, no sensor')
+            out.append(line)
+            i += 1
+        return ''.join(out)
     
     def generate_markov_pir_code(self, recordings):
         """Generate Arduino code for PIR state machine with Markov segment transitions.
@@ -5742,11 +6007,15 @@ void loop() {
                 code += f"      duration = {state_name}Duration;\n"
                 code += f"      numSamples = {state_name}NumSamples;\n"
                 code += f"      if (duration > 0) playbackTime = playbackTime % duration;\n"
-                code += f"      samplePos = ((unsigned long)playbackTime * numSamples * 1000UL) / duration;\n"
-                code += f"      sampleIdx = samplePos / 1000;\n"
+                # The x1000 used to be applied BEFORE the divide, so
+                # playbackTime * numSamples * 1000 overflowed 32-bit unsigned
+                # long on any take longer than ~8s and the sample index
+                # scrambled. Divide first, take the fraction from the remainder.
+                code += f"      samplePos = (unsigned long)playbackTime * (unsigned long)numSamples;\n"
+                code += f"      sampleIdx = samplePos / duration;\n"
                 code += f"      if (sampleIdx >= numSamples) sampleIdx = numSamples - 1;\n"
                 code += f"      nextIdx = (sampleIdx + 1) % numSamples;\n"
-                code += f"      fraction = samplePos % 1000;\n"
+                code += f"      fraction = (int)(((samplePos % duration) * 1000UL) / duration);\n"
                 # Column k of the table is channel STORED_CH[k], not channel k
                 code += f"      for (int k = 0; k < NUM_STORED_CH; k++) {{\n"
                 code += f"        int ch = pgm_read_byte(&STORED_CH[k]);\n"
@@ -5763,11 +6032,13 @@ void loop() {
                     code += f"          duration = {state_name}{suffix}Duration;\n"
                     code += f"          numSamples = {state_name}{suffix}NumSamples;\n"
                     code += f"          if (duration > 0) playbackTime = playbackTime % duration;\n"
-                    code += f"          samplePos = ((unsigned long)playbackTime * numSamples * 1000UL) / duration;\n"
-                    code += f"          sampleIdx = samplePos / 1000;\n"
+                    # divide before scaling -- see the note in the single-take
+                    # branch; the old order overflowed 32 bits past ~8s
+                    code += f"          samplePos = (unsigned long)playbackTime * (unsigned long)numSamples;\n"
+                    code += f"          sampleIdx = samplePos / duration;\n"
                     code += f"          if (sampleIdx >= numSamples) sampleIdx = numSamples - 1;\n"
                     code += f"          nextIdx = (sampleIdx + 1) % numSamples;\n"
-                    code += f"          fraction = samplePos % 1000;\n"
+                    code += f"          fraction = (int)(((samplePos % duration) * 1000UL) / duration);\n"
                     code += f"          for (int k = 0; k < NUM_STORED_CH; k++) {{\n"
                     code += f"            int ch = pgm_read_byte(&STORED_CH[k]);\n"
                     code += f"            int curr = pgm_read_byte(&{state_name}{suffix}Data[sampleIdx][k]);\n"
@@ -5780,11 +6051,11 @@ void loop() {
                 code += f"          duration = {state_name}_0Duration;\n"
                 code += f"          numSamples = {state_name}_0NumSamples;\n"
                 code += f"          if (duration > 0) playbackTime = playbackTime % duration;\n"
-                code += f"          samplePos = ((unsigned long)playbackTime * numSamples * 1000UL) / duration;\n"
-                code += f"          sampleIdx = samplePos / 1000;\n"
+                code += f"          samplePos = (unsigned long)playbackTime * (unsigned long)numSamples;\n"
+                code += f"          sampleIdx = samplePos / duration;\n"
                 code += f"          if (sampleIdx >= numSamples) sampleIdx = numSamples - 1;\n"
                 code += f"          nextIdx = (sampleIdx + 1) % numSamples;\n"
-                code += f"          fraction = samplePos % 1000;\n"
+                code += f"          fraction = (int)(((samplePos % duration) * 1000UL) / duration);\n"
                 code += f"          for (int k = 0; k < NUM_STORED_CH; k++) {{\n"
                 code += f"            int ch = pgm_read_byte(&STORED_CH[k]);\n"
                 code += f"            int curr = pgm_read_byte(&{state_name}_0Data[sampleIdx][k]);\n"
@@ -6435,7 +6706,7 @@ void loop() {
             filepath = self.hardware_config_file
         
         try:
-            with open(filepath, 'w') as f:
+            with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(self.hardware_config, f, indent=2)
             print(f"💾 Saved hardware config: {self.hardware_config['name']}")
             return True
@@ -6516,15 +6787,32 @@ void loop() {
                 self.hardware_config['pir_pin'] = int(self.config_pir_pin_var.get())
             except (ValueError, tk.TclError):
                 pass
+        self.pin_map_rejected = None
         if hasattr(self, 'config_pins_var'):
             # Only accept a COMPLETE, well-formed map. A half-typed field
             # would otherwise reshuffle every channel's pin mid-keystroke.
+            #
+            # But a rejection used to be SILENT: the entry kept displaying what
+            # was typed while the config held the old map, so the UI showed a
+            # pin the exporter had never heard of. Say what was wrong instead.
+            raw = self.config_pins_var.get()
             try:
-                parsed = [int(p) for p in self.config_pins_var.get().replace(' ', '').split(',') if p != '']
-                if len(parsed) == self.num_servos:
-                    self.hardware_config['pin_mapping'] = parsed
+                parsed = [int(p) for p in raw.replace(' ', '').split(',') if p != '']
             except ValueError:
-                pass
+                self.pin_map_rejected = (raw, "it contains something that is not a whole number")
+            else:
+                if len(parsed) == self.num_servos:
+                    duplicates = sorted({p for p in parsed if parsed.count(p) > 1})
+                    if duplicates:
+                        self.pin_map_rejected = (
+                            raw, f"pin(s) {', '.join('D' + str(d) for d in duplicates)} appear more "
+                                 "than once -- two channels cannot share one pin")
+                    else:
+                        self.hardware_config['pin_mapping'] = parsed
+                else:
+                    self.pin_map_rejected = (
+                        raw, f"it lists {len(parsed)} pin(s) but there are "
+                             f"{self.num_servos} channels")
 
         # Apply the changes (also re-derives labels and re-checks the PIR pin)
         self.apply_hardware_config()
@@ -6532,6 +6820,22 @@ void loop() {
         # If the PIR pin collided with a servo pin it has just been moved. Push
         # the corrected value back into the spinbox and say so -- otherwise the
         # field goes on displaying a pin the sketch will never use.
+        # Say so when the pin map was thrown away, and put the field back to
+        # what is actually in effect so it stops advertising a map nothing uses.
+        rejected = getattr(self, 'pin_map_rejected', None)
+        if rejected:
+            typed, reason = rejected
+            self.pin_map_rejected = None
+            live = ', '.join(str(p) for p in self.hardware_config['pin_mapping'])
+            if hasattr(self, 'config_pins_var'):
+                self.config_pins_var.set(live)
+            tkinter.messagebox.showwarning(
+                "Pin Map Not Applied",
+                f"The pin list was not applied because {reason}.\n\n"
+                f"You typed:  {typed}\n"
+                f"Still in use:  {live}\n\n"
+                "Nothing else was changed. Fix the list and apply again.")
+
         widened = getattr(self, 'safe_range_widened', None)
         if widened:
             old_lo, old_hi, new_lo, new_hi = widened
@@ -6623,7 +6927,7 @@ void loop() {
                 'captured_keyframes': self.captured_keyframes
             }
             
-            with open(filename, 'w') as f:
+            with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(save_data, f, indent=2)
             
             print(f"💾 Saved {len(self.recorded_layers)} layers to {filename}")
@@ -7211,7 +7515,7 @@ void loop() {
         filepath = os.path.join(os.getcwd(), filename)
         
         try:
-            with open(filepath, 'w') as f:
+            with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(code)
             
             tkinter.messagebox.showinfo("Full-Detail Export Successful", 
@@ -7442,8 +7746,10 @@ int servoPins[{self.num_servos}] = {{{pin_str}}};
 // Range configuration (from hardware preset: {self.hardware_config['name']})
 const int MIN_ANGLE = {min_angle};
 const int MAX_ANGLE = {max_angle};
-// Per-channel performed range (per-servo limit ∩ expressive range). No host
-// here to apply it, so it is compiled in.
+// Per-channel performed range: the per-servo limit intersected with the
+// expressive range. No host here to apply it, so it is compiled in.
+// (Kept ASCII on purpose -- generated sketches are written with the platform
+// default codec, and a stray non-ASCII character kills the export on Windows.)
 const int servoMin[{self.num_servos}] = {{{eff_min_str}}};
 const int servoMax[{self.num_servos}] = {{{eff_max_str}}};
 
@@ -7728,7 +8034,10 @@ void loop() {
                 fg=self.colors['text_main']).grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
         # default from the saved config, not a literal -- 3 now drives S9
         pir_pin = tk.IntVar(value=self.hardware_config.get('pir_pin', 2))
-        tk.Spinbox(pir_frame, from_=2, to=13, textvariable=pir_pin, width=10).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+        # Same bounds as the Hardware Config spinbox. This used to stop at 13,
+        # so a PIR configured on A0-A5 was silently clamped back to 13 here and
+        # that clamped value was what got baked into the sketch.
+        tk.Spinbox(pir_frame, from_=2, to=19, textvariable=pir_pin, width=10).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
         
         tk.Label(pir_frame, text="Motion Timeout (seconds):", bg=self.colors['bg_frame'], 
                 fg=self.colors['text_main']).grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
@@ -7776,7 +8085,7 @@ void loop() {
             filepath = os.path.join(os.getcwd(), filename)
             
             try:
-                with open(filepath, 'w') as f:
+                with open(filepath, 'w', encoding='utf-8') as f:
                     f.write(code)
                 
                 tkinter.messagebox.showinfo("Multi-Phrase Export Successful", 
@@ -7919,8 +8228,10 @@ const int startupPositions[{self.num_servos}] = {{{startup_positions_str}}};
 // Range configuration (from hardware preset: {self.hardware_config['name']})
 const int MIN_ANGLE = {min_angle};
 const int MAX_ANGLE = {max_angle};
-// Per-channel performed range (per-servo limit ∩ expressive range). No host
-// here to apply it, so it is compiled in.
+// Per-channel performed range: the per-servo limit intersected with the
+// expressive range. No host here to apply it, so it is compiled in.
+// (Kept ASCII on purpose -- generated sketches are written with the platform
+// default codec, and a stray non-ASCII character kills the export on Windows.)
 const int servoMin[{self.num_servos}] = {{{eff_min_str}}};
 const int servoMax[{self.num_servos}] = {{{eff_max_str}}};
 
