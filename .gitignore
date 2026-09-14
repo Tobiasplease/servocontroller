@@ -7,6 +7,7 @@ __pycache__/
 build/
 dist/
 *.spec
+!HandControl-onefile.spec
 
 # Runtime state
 current_emotion.json

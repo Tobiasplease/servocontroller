@@ -100,6 +100,28 @@ Or use the launcher:
 python launcher.py
 ```
 
+## Standalone EXE (no Python on the target machine)
+
+Run `build_exe.bat` on a Windows machine that has Python. It produces a
+single-file `dist\HandControl.exe` and stages `dist\HandControl\` containing:
+
+```
+HandControl.exe
+hardware_config.json
+pir_recordings/
+```
+
+Copy that **whole folder** to the other computer and double-click the EXE —
+nothing to install. The config and recordings live beside the EXE rather than
+inside it, so presets you save and takes you record persist across restarts and
+travel with the folder.
+
+Notes:
+- Exported `.ino` files and saved recordings land next to the EXE.
+- First launch takes a few seconds (the onefile build unpacks to a temp dir).
+- Windows SmartScreen may warn on an unsigned EXE: *More info → Run anyway*.
+- The Arduino side is unchanged — flash the listener sketch as usual.
+
 ## Usage Guide
 
 ### Basic Operation
